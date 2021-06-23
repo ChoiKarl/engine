@@ -1,7 +1,6 @@
 // Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-// FLUTTER_NOLINT
 
 #define FML_USED_ON_EMBEDDER
 
@@ -12,17 +11,39 @@
 #include "flutter/fml/synchronization/waitable_event.h"
 #include "gtest/gtest.h"
 
+namespace fml {
+namespace testing {
+
 class TestWakeable : public fml::Wakeable {
  public:
   using WakeUpCall = std::function<void(const fml::TimePoint)>;
 
-  TestWakeable(WakeUpCall call) : wake_up_call_(call) {}
+  explicit TestWakeable(WakeUpCall call) : wake_up_call_(call) {}
 
   void WakeUp(fml::TimePoint time_point) override { wake_up_call_(time_point); }
 
  private:
   WakeUpCall wake_up_call_;
 };
+
+static int CountRemainingTasks(fml::RefPtr<MessageLoopTaskQueues> task_queue,
+                               const TaskQueueId& queue_id,
+                               bool run_invocation = false) {
+  const auto now = fml::TimePoint::Now();
+  int count = 0;
+  fml::closure invocation;
+  do {
+    invocation = task_queue->GetNextTaskToRun(queue_id, now);
+    if (!invocation) {
+      break;
+    }
+    count++;
+    if (run_invocation) {
+      invocation();
+    }
+  } while (invocation);
+  return count;
+}
 
 TEST(MessageLoopTaskQueueMergeUnmerge,
      AfterMergePrimaryTasksServicedOnPrimary) {
@@ -128,8 +149,7 @@ TEST(MessageLoopTaskQueueMergeUnmerge, MergeInvokesBothWakeables) {
 
   task_queue->Merge(queue_id_1, queue_id_2);
 
-  std::vector<fml::closure> invocations;
-  task_queue->GetTasksToRunNow(queue_id_1, fml::FlushType::kAll, invocations);
+  CountRemainingTasks(task_queue, queue_id_1);
 
   latch.Wait();
 }
@@ -158,12 +178,12 @@ TEST(MessageLoopTaskQueueMergeUnmerge,
   task_queue->Merge(queue_id_1, queue_id_2);
   task_queue->Unmerge(queue_id_1);
 
-  std::vector<fml::closure> invocations;
+  CountRemainingTasks(task_queue, queue_id_1);
 
-  task_queue->GetTasksToRunNow(queue_id_1, fml::FlushType::kAll, invocations);
   latch_1.Wait();
 
-  task_queue->GetTasksToRunNow(queue_id_2, fml::FlushType::kAll, invocations);
+  CountRemainingTasks(task_queue, queue_id_2);
+
   latch_2.Wait();
 }
 
@@ -184,10 +204,8 @@ TEST(MessageLoopTaskQueueMergeUnmerge, GetTasksToRunNowBlocksMerge) {
                             wake_up_end.Wait();
                           }));
 
-  std::thread tasks_to_run_now_thread([&]() {
-    std::vector<fml::closure> invocations;
-    task_queue->GetTasksToRunNow(queue_id_1, fml::FlushType::kAll, invocations);
-  });
+  std::thread tasks_to_run_now_thread(
+      [&]() { CountRemainingTasks(task_queue, queue_id_1); });
 
   wake_up_start.Wait();
   bool merge_done = false;
@@ -209,3 +227,35 @@ TEST(MessageLoopTaskQueueMergeUnmerge, GetTasksToRunNowBlocksMerge) {
   tasks_to_run_now_thread.join();
   merge_thread.join();
 }
+
+TEST(MessageLoopTaskQueueMergeUnmerge,
+     FollowingTasksSwitchQueueIfFirstTaskMergesThreads) {
+  auto task_queue = fml::MessageLoopTaskQueues::GetInstance();
+
+  auto queue_id_1 = task_queue->CreateTaskQueue();
+  auto queue_id_2 = task_queue->CreateTaskQueue();
+
+  fml::CountDownLatch latch(2);
+
+  task_queue->SetWakeable(
+      queue_id_1,
+      new TestWakeable([&](fml::TimePoint wake_time) { latch.CountDown(); }));
+  task_queue->SetWakeable(
+      queue_id_2,
+      new TestWakeable([&](fml::TimePoint wake_time) { latch.CountDown(); }));
+
+  task_queue->RegisterTask(
+      queue_id_2, [&]() { task_queue->Merge(queue_id_1, queue_id_2); },
+      fml::TimePoint::Now());
+
+  task_queue->RegisterTask(
+      queue_id_2, []() {}, fml::TimePoint::Now());
+
+  ASSERT_EQ(CountRemainingTasks(task_queue, queue_id_2, true), 1);
+  ASSERT_EQ(CountRemainingTasks(task_queue, queue_id_1, true), 1);
+
+  latch.Wait();
+}
+
+}  // namespace testing
+}  // namespace fml

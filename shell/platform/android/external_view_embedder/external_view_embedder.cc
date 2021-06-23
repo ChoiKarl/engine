@@ -5,13 +5,14 @@
 #include "flutter/shell/platform/android/external_view_embedder/external_view_embedder.h"
 
 #include "flutter/fml/trace_event.h"
+#include "flutter/shell/platform/android/surface/android_surface.h"
 
 namespace flutter {
 
 AndroidExternalViewEmbedder::AndroidExternalViewEmbedder(
-    std::shared_ptr<AndroidContext> android_context,
+    const AndroidContext& android_context,
     std::shared_ptr<PlatformViewAndroidJNI> jni_facade,
-    const AndroidSurface::Factory& surface_factory)
+    std::shared_ptr<AndroidSurfaceFactory> surface_factory)
     : ExternalViewEmbedder(),
       android_context_(android_context),
       jni_facade_(jni_facade),
@@ -73,16 +74,17 @@ SkRect AndroidExternalViewEmbedder::GetViewRect(int view_id) const {
 
 // |ExternalViewEmbedder|
 void AndroidExternalViewEmbedder::SubmitFrame(
-    GrContext* context,
-    std::unique_ptr<SurfaceFrame> frame) {
+    GrDirectContext* context,
+    std::unique_ptr<SurfaceFrame> frame,
+    const std::shared_ptr<const fml::SyncSwitch>& gpu_disable_sync_switch) {
   TRACE_EVENT0("flutter", "AndroidExternalViewEmbedder::SubmitFrame");
 
-  if (should_run_rasterizer_on_platform_thread_) {
-    // Don't submit the current frame if the frame will be resubmitted.
+  if (!FrameHasPlatformLayers()) {
+    frame->Submit();
     return;
   }
 
-  std::unordered_map<int64_t, std::list<SkRect>> overlay_layers;
+  std::unordered_map<int64_t, SkRect> overlay_layers;
   std::unordered_map<int64_t, sk_sp<SkPicture>> pictures;
   SkCanvas* background_canvas = frame->SkiaCanvas();
   auto current_frame_view_count = composition_order_.size();
@@ -99,9 +101,9 @@ void AndroidExternalViewEmbedder::SubmitFrame(
     FML_CHECK(picture);
     pictures.insert({view_id, picture});
 
-    overlay_layers.insert({view_id, {}});
-
     sk_sp<RTree> rtree = view_rtrees_.at(view_id);
+    SkRect joined_rect = SkRect::MakeEmpty();
+
     // Determinate if Flutter UI intersects with any of the previous
     // platform views stacked by z position.
     //
@@ -114,32 +116,27 @@ void AndroidExternalViewEmbedder::SubmitFrame(
       // Each rect corresponds to a native view that renders Flutter UI.
       std::list<SkRect> intersection_rects =
           rtree->searchNonOverlappingDrawnRects(current_view_rect);
-      auto allocation_size = intersection_rects.size();
 
       // Limit the number of native views, so it doesn't grow forever.
       //
       // In this case, the rects are merged into a single one that is the union
       // of all the rects.
-      if (allocation_size > kMaxLayerAllocations) {
-        SkRect joined_rect;
-        for (const SkRect& rect : intersection_rects) {
-          joined_rect.join(rect);
-        }
-        intersection_rects.clear();
-        intersection_rects.push_back(joined_rect);
+      for (const SkRect& rect : intersection_rects) {
+        joined_rect.join(rect);
       }
-      for (SkRect& intersection_rect : intersection_rects) {
-        // Subpixels in the platform may not align with the canvas subpixels.
-        //
-        // To workaround it, round the floating point bounds and make the rect
-        // slighly larger. For example, {0.3, 0.5, 3.1, 4.7} becomes {0, 0, 4,
-        // 5}.
-        intersection_rect.set(intersection_rect.roundOut());
-        overlay_layers.at(view_id).push_back(intersection_rect);
-        // Clip the background canvas, so it doesn't contain any of the pixels
-        // drawn on the overlay layer.
-        background_canvas->clipRect(intersection_rect, SkClipOp::kDifference);
-      }
+    }
+    if (!joined_rect.isEmpty()) {
+      // Subpixels in the platform may not align with the canvas subpixels.
+      //
+      // To workaround it, round the floating point bounds and make the rect
+      // slightly larger.
+      //
+      // For example, {0.3, 0.5, 3.1, 4.7} becomes {0, 0, 4, 5}.
+      joined_rect.set(joined_rect.roundOut());
+      overlay_layers.insert({view_id, joined_rect});
+      // Clip the background canvas, so it doesn't contain any of the pixels
+      // drawn on the overlay layer.
+      background_canvas->clipRect(joined_rect, SkClipOp::kDifference);
     }
     background_canvas->drawPicture(pictures.at(view_id));
   }
@@ -148,8 +145,7 @@ void AndroidExternalViewEmbedder::SubmitFrame(
   //
   // Skip a frame if the embedding is switching surfaces, and indicate in
   // `PostPrerollAction` that this frame must be resubmitted.
-  auto should_submit_current_frame =
-      previous_frame_view_count_ > 0 || current_frame_view_count == 0;
+  auto should_submit_current_frame = previous_frame_view_count_ > 0;
   if (should_submit_current_frame) {
     frame->Submit();
   }
@@ -169,23 +165,26 @@ void AndroidExternalViewEmbedder::SubmitFrame(
         params.sizePoints().height() * device_pixel_ratio_,
         params.mutatorsStack()  //
     );
-    for (const SkRect& overlay_rect : overlay_layers.at(view_id)) {
-      std::unique_ptr<SurfaceFrame> frame =
-          CreateSurfaceIfNeeded(context,               //
-                                view_id,               //
-                                pictures.at(view_id),  //
-                                overlay_rect           //
-          );
-      if (should_submit_current_frame) {
-        frame->Submit();
-      }
+    std::unordered_map<int64_t, SkRect>::const_iterator overlay =
+        overlay_layers.find(view_id);
+    if (overlay == overlay_layers.end()) {
+      continue;
+    }
+    std::unique_ptr<SurfaceFrame> frame =
+        CreateSurfaceIfNeeded(context,               //
+                              view_id,               //
+                              pictures.at(view_id),  //
+                              overlay->second        //
+        );
+    if (should_submit_current_frame) {
+      frame->Submit();
     }
   }
 }
 
 // |ExternalViewEmbedder|
 std::unique_ptr<SurfaceFrame>
-AndroidExternalViewEmbedder::CreateSurfaceIfNeeded(GrContext* context,
+AndroidExternalViewEmbedder::CreateSurfaceIfNeeded(GrDirectContext* context,
                                                    int64_t view_id,
                                                    sk_sp<SkPicture> picture,
                                                    const SkRect& rect) {
@@ -214,31 +213,33 @@ AndroidExternalViewEmbedder::CreateSurfaceIfNeeded(GrContext* context,
 // |ExternalViewEmbedder|
 PostPrerollResult AndroidExternalViewEmbedder::PostPrerollAction(
     fml::RefPtr<fml::RasterThreadMerger> raster_thread_merger) {
-  // This frame may remove existing platform views that aren't contained
-  // in `composition_order_`.
-  //
-  // If this frame doesn't have platform views, it's still required to keep
-  // the rasterizer running on the platform thread for at least one more
-  // frame.
-  //
-  // To keep the rasterizer running on the platform thread one more frame,
-  // `kDefaultMergedLeaseDuration` must be at least `1`.
-  bool has_platform_views = composition_order_.size() > 0;
-  if (has_platform_views) {
-    if (raster_thread_merger->IsMerged()) {
-      raster_thread_merger->ExtendLeaseTo(kDefaultMergedLeaseDuration);
-    } else {
-      // Merge the raster and platform threads in `EndFrame`.
-      should_run_rasterizer_on_platform_thread_ = true;
-      CancelFrame();
-      return PostPrerollResult::kResubmitFrame;
-    }
-    // Surface switch requires to resubmit the frame.
-    if (previous_frame_view_count_ == 0) {
-      return PostPrerollResult::kResubmitFrame;
-    }
+  if (!FrameHasPlatformLayers()) {
+    return PostPrerollResult::kSuccess;
+  }
+  if (!raster_thread_merger->IsMerged()) {
+    // The raster thread merger may be disabled if the rasterizer is being
+    // created or teared down.
+    //
+    // In such cases, the current frame is dropped, and a new frame is attempted
+    // with the same layer tree.
+    //
+    // Eventually, the frame is submitted once this method returns `kSuccess`.
+    // At that point, the raster tasks are handled on the platform thread.
+    raster_thread_merger->MergeWithLease(kDefaultMergedLeaseDuration);
+    CancelFrame();
+    return PostPrerollResult::kSkipAndRetryFrame;
+  }
+  raster_thread_merger->ExtendLeaseTo(kDefaultMergedLeaseDuration);
+  // Surface switch requires to resubmit the frame.
+  // TODO(egarciad): https://github.com/flutter/flutter/issues/65652
+  if (previous_frame_view_count_ == 0) {
+    return PostPrerollResult::kResubmitFrame;
   }
   return PostPrerollResult::kSuccess;
+}
+
+bool AndroidExternalViewEmbedder::FrameHasPlatformLayers() {
+  return composition_order_.size() > 0;
 }
 
 // |ExternalViewEmbedder|
@@ -257,22 +258,24 @@ void AndroidExternalViewEmbedder::Reset() {
 // |ExternalViewEmbedder|
 void AndroidExternalViewEmbedder::BeginFrame(
     SkISize frame_size,
-    GrContext* context,
+    GrDirectContext* context,
     double device_pixel_ratio,
     fml::RefPtr<fml::RasterThreadMerger> raster_thread_merger) {
   Reset();
 
   // The surface size changed. Therefore, destroy existing surfaces as
   // the existing surfaces in the pool can't be recycled.
-  if (frame_size_ != frame_size) {
+  if (frame_size_ != frame_size && raster_thread_merger->IsOnPlatformThread()) {
     surface_pool_->DestroyLayers(jni_facade_);
   }
-  frame_size_ = frame_size;
-  device_pixel_ratio_ = device_pixel_ratio;
+  surface_pool_->SetFrameSize(frame_size);
   // JNI method must be called on the platform thread.
   if (raster_thread_merger->IsOnPlatformThread()) {
     jni_facade_->FlutterViewBeginFrame();
   }
+
+  frame_size_ = frame_size;
+  device_pixel_ratio_ = device_pixel_ratio;
 }
 
 // |ExternalViewEmbedder|
@@ -284,15 +287,16 @@ void AndroidExternalViewEmbedder::CancelFrame() {
 void AndroidExternalViewEmbedder::EndFrame(
     bool should_resubmit_frame,
     fml::RefPtr<fml::RasterThreadMerger> raster_thread_merger) {
-  if (should_resubmit_frame && should_run_rasterizer_on_platform_thread_) {
-    raster_thread_merger->MergeWithLease(kDefaultMergedLeaseDuration);
-    should_run_rasterizer_on_platform_thread_ = false;
-  }
   surface_pool_->RecycleLayers();
   // JNI method must be called on the platform thread.
   if (raster_thread_merger->IsOnPlatformThread()) {
     jni_facade_->FlutterViewEndFrame();
   }
+}
+
+// |ExternalViewEmbedder|
+bool AndroidExternalViewEmbedder::SupportsDynamicThreadMerging() {
+  return true;
 }
 
 }  // namespace flutter

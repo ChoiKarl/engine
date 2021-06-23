@@ -1,7 +1,6 @@
 // Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-// FLUTTER_NOLINT
 
 #include <algorithm>
 #include <iomanip>
@@ -42,7 +41,8 @@ struct SwitchDesc {
 
 // clang-format off
 static const std::string gAllowedDartFlags[] = {
-    "--no-causal_async_stacks",
+    "--enable-isolate-groups",
+    "--no-enable-isolate-groups",
     "--lazy_async_stacks",
 };
 // clang-format on
@@ -51,18 +51,21 @@ static const std::string gAllowedDartFlags[] = {
 
 // clang-format off
 static const std::string gAllowedDartFlags[] = {
+    "--enable-isolate-groups",
+    "--no-enable-isolate-groups",
     "--enable_mirrors",
     "--enable-service-port-fallback",
     "--lazy_async_stacks",
     "--max_profile_depth",
-    "--no-causal_async_stacks",
     "--profile_period",
     "--random_seed",
     "--sample-buffer-duration",
+    "--trace-kernel",
     "--trace-reload",
     "--trace-reload-verbose",
     "--write-service-info",
     "--null_assertions",
+    "--strict_null_safety_checks",
 };
 // clang-format on
 
@@ -150,6 +153,16 @@ const std::string_view FlagForSwitch(Switch swtch) {
   return std::string_view();
 }
 
+static std::vector<std::string> ParseCommaDelimited(const std::string& input) {
+  std::istringstream ss(input);
+  std::vector<std::string> result;
+  std::string token;
+  while (std::getline(ss, token, ',')) {
+    result.push_back(token);
+  }
+  return result;
+}
+
 static bool IsAllowedDartVMFlag(const std::string& flag) {
   for (uint32_t i = 0; i < fml::size(gAllowedDartFlags); ++i) {
     const std::string& allowed = gAllowedDartFlags[i];
@@ -217,6 +230,10 @@ Settings SettingsFromCommandLine(const fml::CommandLine& command_line) {
   settings.enable_observatory =
       !command_line.HasOption(FlagForSwitch(Switch::DisableObservatory));
 
+  // Enable mDNS Observatory Publication
+  settings.enable_observatory_publication = !command_line.HasOption(
+      FlagForSwitch(Switch::DisableObservatoryPublication));
+
   // Set Observatory Host
   if (command_line.HasOption(FlagForSwitch(Switch::DeviceObservatoryHost))) {
     command_line.GetOptionValue(FlagForSwitch(Switch::DeviceObservatoryHost),
@@ -229,9 +246,6 @@ Settings SettingsFromCommandLine(const fml::CommandLine& command_line) {
                                                             : "127.0.0.1";
   }
 
-  settings.use_embedded_view =
-      command_line.HasOption(FlagForSwitch(Switch::UseEmbeddedView));
-
   // Set Observatory Port
   if (command_line.HasOption(FlagForSwitch(Switch::DeviceObservatoryPort))) {
     if (!GetSwitchValue(command_line, Switch::DeviceObservatoryPort,
@@ -242,8 +256,11 @@ Settings SettingsFromCommandLine(const fml::CommandLine& command_line) {
     }
   }
 
-  settings.disable_http =
-      command_line.HasOption(FlagForSwitch(Switch::DisableHttp));
+  settings.may_insecurely_connect_to_all_domains = !command_line.HasOption(
+      FlagForSwitch(Switch::DisallowInsecureConnections));
+
+  command_line.GetOptionValue(FlagForSwitch(Switch::DomainNetworkPolicy),
+                              &settings.domain_network_policy);
 
   // Disable need for authentication codes for VM service communication, if
   // specified.
@@ -277,20 +294,23 @@ Settings SettingsFromCommandLine(const fml::CommandLine& command_line) {
   settings.trace_startup =
       command_line.HasOption(FlagForSwitch(Switch::TraceStartup));
 
-  settings.trace_skia =
-      command_line.HasOption(FlagForSwitch(Switch::TraceSkia));
+#if !FLUTTER_RELEASE
+  settings.trace_skia = true;
 
-  command_line.GetOptionValue(FlagForSwitch(Switch::TraceAllowlist),
-                              &settings.trace_allowlist);
-
-  if (settings.trace_allowlist.empty()) {
-    command_line.GetOptionValue(FlagForSwitch(Switch::TraceWhitelist),
-                                &settings.trace_allowlist);
-    if (!settings.trace_allowlist.empty()) {
-      FML_LOG(INFO)
-          << "--trace-whitelist is deprecated. Use --trace-allowlist instead.";
-    }
+  std::string trace_skia_allowlist;
+  command_line.GetOptionValue(FlagForSwitch(Switch::TraceSkiaAllowlist),
+                              &trace_skia_allowlist);
+  if (trace_skia_allowlist.size()) {
+    settings.trace_skia_allowlist = ParseCommaDelimited(trace_skia_allowlist);
+  } else {
+    settings.trace_skia_allowlist = {"skia.shaders"};
   }
+#endif  // !FLUTTER_RELEASE
+
+  std::string trace_allowlist;
+  command_line.GetOptionValue(FlagForSwitch(Switch::TraceAllowlist),
+                              &trace_allowlist);
+  settings.trace_allowlist = ParseCommaDelimited(trace_allowlist);
 
   settings.trace_systrace =
       command_line.HasOption(FlagForSwitch(Switch::TraceSystrace));
@@ -369,14 +389,15 @@ Settings SettingsFromCommandLine(const fml::CommandLine& command_line) {
   settings.use_test_fonts =
       command_line.HasOption(FlagForSwitch(Switch::UseTestFonts));
 
+  settings.enable_skparagraph =
+      command_line.HasOption(FlagForSwitch(Switch::EnableSkParagraph));
+
   std::string all_dart_flags;
   if (command_line.GetOptionValue(FlagForSwitch(Switch::DartFlags),
                                   &all_dart_flags)) {
-    std::stringstream stream(all_dart_flags);
-    std::string flag;
-
     // Assume that individual flags are comma separated.
-    while (std::getline(stream, flag, ',')) {
+    std::vector<std::string> flags = ParseCommaDelimited(all_dart_flags);
+    for (auto flag : flags) {
       if (!IsAllowedDartVMFlag(flag)) {
         FML_LOG(FATAL) << "Encountered disallowed Dart VM flag: " << flag;
       }
@@ -394,6 +415,15 @@ Settings SettingsFromCommandLine(const fml::CommandLine& command_line) {
   settings.cache_sksl =
       command_line.HasOption(FlagForSwitch(Switch::CacheSkSL));
 
+  settings.purge_persistent_cache =
+      command_line.HasOption(FlagForSwitch(Switch::PurgePersistentCache));
+
+  if (command_line.HasOption(FlagForSwitch(Switch::OldGenHeapSize))) {
+    std::string old_gen_heap_size;
+    command_line.GetOptionValue(FlagForSwitch(Switch::OldGenHeapSize),
+                                &old_gen_heap_size);
+    settings.old_gen_heap_size = std::stoi(old_gen_heap_size);
+  }
   return settings;
 }
 

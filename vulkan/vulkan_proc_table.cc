@@ -1,7 +1,6 @@
 // Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-// FLUTTER_NOLINT
 
 #include "vulkan_proc_table.h"
 
@@ -138,8 +137,12 @@ bool VulkanProcTable::SetupDeviceProcAddresses(
   ACQUIRE_PROC(QueuePresentKHR, handle);
 #endif  // OS_ANDROID
 #if OS_FUCHSIA
+  ACQUIRE_PROC(CreateBufferCollectionFUCHSIA, handle);
+  ACQUIRE_PROC(DestroyBufferCollectionFUCHSIA, handle);
   ACQUIRE_PROC(GetMemoryZirconHandleFUCHSIA, handle);
   ACQUIRE_PROC(ImportSemaphoreZirconHandleFUCHSIA, handle);
+  ACQUIRE_PROC(SetBufferCollectionConstraintsFUCHSIA, handle);
+  ACQUIRE_PROC(GetBufferCollectionPropertiesFUCHSIA, handle);
 #endif  // OS_FUCHSIA
   device_ = {handle, nullptr};
   return true;

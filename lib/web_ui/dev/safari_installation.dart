@@ -2,22 +2,21 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// @dart = 2.6
 import 'dart:async';
 import 'dart:io' as io;
 
 import 'package:args/args.dart';
+import 'package:simulators/simulator_manager.dart';
 import 'package:yaml/yaml.dart';
 
 import 'common.dart';
+import 'utils.dart';
 
 class SafariArgParser extends BrowserArgParser {
   static final SafariArgParser _singletonInstance = SafariArgParser._();
 
   /// The [SafariArgParser] singleton.
   static SafariArgParser get instance => _singletonInstance;
-
-  String _version;
 
   SafariArgParser._();
 
@@ -47,41 +46,100 @@ class SafariArgParser extends BrowserArgParser {
 
   @override
   String get version => _version;
+  late String _version;
 
-  bool _isMobileBrowser;
   bool get isMobileBrowser => _isMobileBrowser;
+  late bool _isMobileBrowser;
 }
 
 class IosSafariArgParser extends BrowserArgParser {
-  static final IosSafariArgParser _singletonInstance = IosSafariArgParser._();
+  static final IosSafariArgParser _singletonInstance = () {
+    final YamlMap browserLock = BrowserLock.instance.configuration;
+    return IosSafariArgParser._(
+      pinnedIosMajorVersion: browserLock['ios-safari']['majorVersion'] as int,
+      pinnedIosMinorVersion: browserLock['ios-safari']['minorVersion'] as int,
+      pinnedIosDevice: browserLock['ios-safari']['device'] as String,
+    );
+  }();
 
   /// The [IosSafariArgParser] singleton.
   static IosSafariArgParser get instance => _singletonInstance;
 
   String get version => 'iOS ${iosMajorVersion}.${iosMinorVersion}';
 
-  int _pinnedIosMajorVersion;
-  int _iosMajorVersion;
+  final int _pinnedIosMajorVersion;
+  int? _iosMajorVersion;
   int get iosMajorVersion => _iosMajorVersion ?? _pinnedIosMajorVersion;
 
-  int _pinnedIosMinorVersion;
-  int _iosMinorVersion;
+  final int _pinnedIosMinorVersion;
+  int? _iosMinorVersion;
   int get iosMinorVersion => _iosMinorVersion ?? _pinnedIosMinorVersion;
 
-  String _pinnedIosDevice;
-  String _iosDevice;
+  final String _pinnedIosDevice;
+  String? _iosDevice;
   String get iosDevice => _iosDevice ?? _pinnedIosDevice;
 
-  IosSafariArgParser._();
+  IosSafariArgParser._({
+    required int pinnedIosMajorVersion,
+    required int pinnedIosMinorVersion,
+    required String pinnedIosDevice,
+  }) :
+    this._pinnedIosMajorVersion = pinnedIosMajorVersion,
+    this._pinnedIosMinorVersion = pinnedIosMinorVersion,
+    this._pinnedIosDevice = pinnedIosDevice;
+
+  /// Returns [IosSimulator] if the [Platform] is `macOS` and simulator
+  /// is started.
+  ///
+  /// Throws an [StateError] if these two conditions are not met.
+  IosSimulator get iosSimulator {
+    if (!io.Platform.isMacOS) {
+      throw StateError('iOS Simulator is only available on macOS machines.');
+    }
+    if (_iosSimulator == null) {
+      throw StateError(
+        'iOS Simulator not started. Please first call initIOSSimulator method',
+      );
+    }
+    return _iosSimulator!;
+  }
+  IosSimulator? _iosSimulator;
+
+  /// Inializes and boots an [IosSimulator] using the [iosMajorVersion],
+  /// [iosMinorVersion] and [iosDevice] arguments.
+  Future<void> initIosSimulator() async {
+    if (_iosSimulator != null) {
+      throw StateError('_iosSimulator can only be initialized once');
+    }
+    final IosSimulatorManager iosSimulatorManager = IosSimulatorManager();
+    final IosSimulator simulator;
+    try {
+      simulator = await iosSimulatorManager.getSimulator(
+        iosMajorVersion,
+        iosMinorVersion,
+        iosDevice,
+      );
+      _iosSimulator = simulator;
+    } catch (e) {
+      throw Exception('Error getting requested simulator. Try running '
+          '`felt create` command first before running the tests. Exception: '
+          '$e');
+    }
+
+    if (!simulator.booted) {
+      await simulator.boot();
+      print('INFO: Simulator ${simulator.id} booted.');
+      cleanupCallbacks.add(() async {
+        await simulator.shutdown();
+        print('INFO: Simulator ${simulator.id} shutdown.');
+      });
+    }
+  }
 
   @override
   void populateOptions(ArgParser argParser) {
-    final YamlMap browserLock = BrowserLock.instance.configuration;
-    _pinnedIosMajorVersion = browserLock['ios-safari']['majorVersion'] as int;
-    _pinnedIosMinorVersion = browserLock['ios-safari']['minorVersion'] as int;
     final pinnedIosVersion =
         '${_pinnedIosMajorVersion}.${_pinnedIosMinorVersion}';
-    _pinnedIosDevice = browserLock['ios-safari']['device'] as String;
     argParser
       ..addOption('version',
           defaultsTo: '$pinnedIosVersion',
@@ -95,7 +153,7 @@ class IosSafariArgParser extends BrowserArgParser {
       ..addOption('device',
           defaultsTo: '$_pinnedIosDevice',
           help: 'The device to be used for the iOS Simulator during the tests. '
-              'Use `.` instead of space for seperating the words. '
+              'Use `.` instead of space for separating the words. '
               'Common examples: iPhone.8, iPhone.8.Plus, iPhone.11, '
               'iPhone 11 Pro. Use command: '
               '`xcrun simctl list devices` for listing the available '
@@ -106,7 +164,7 @@ class IosSafariArgParser extends BrowserArgParser {
   @override
   void parseOptions(ArgResults argResults) {
     final String iosVersion = argResults['version'] as String;
-    // The version will contain major and minor version seperated by a comma,
+    // The version will contain major and minor version separated by a comma,
     // for example: 13.1, 12.2
     assert(iosVersion.split('.').length == 2,
         'The version should be in format 13.5');
@@ -127,7 +185,7 @@ class IosSafariArgParser extends BrowserArgParser {
 // technology preview.
 Future<BrowserInstallation> getOrInstallSafari(
   String requestedVersion, {
-  StringSink infoLog,
+  StringSink? infoLog,
 }) async {
   // These tests are aimed to run only on macOS machines local or on LUCI.
   if (!io.Platform.isMacOS) {

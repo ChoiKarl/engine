@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// @dart = 2.6
 import 'dart:html' as html;
 
+import 'package:test/bootstrap/browser.dart';
+import 'package:test/test.dart';
 import 'package:ui/src/engine.dart';
 import 'package:ui/ui.dart';
-import 'package:test/test.dart';
 
 import 'package:web_engine_tester/golden_tester.dart';
 
@@ -15,10 +15,14 @@ import 'scuba.dart';
 
 const Color _kShadowColor = Color.fromARGB(255, 0, 0, 0);
 
-void main() async {
+void main() {
+  internalBootstrapBrowserTest(() => testMain);
+}
+
+void testMain() async {
   final Rect region = Rect.fromLTWH(0, 0, 550, 300);
 
-  SurfaceSceneBuilder builder;
+  late SurfaceSceneBuilder builder;
 
   setUpStableTestFonts();
 
@@ -27,7 +31,7 @@ void main() async {
   });
 
   void _paintShapeOutline() {
-    final EnginePictureRecorder recorder = PictureRecorder();
+    final EnginePictureRecorder recorder = EnginePictureRecorder();
     final RecordingCanvas canvas = recorder.beginRecording(Rect.largest);
     canvas.drawRect(
       const Rect.fromLTRB(0.0, 0.0, 20.0, 20.0),
@@ -70,12 +74,13 @@ void main() async {
     builder.pop(); // offset
   }
 
-  void _paintBitmapCanvasShadow(double elevation, Offset offset, bool transparentOccluder) {
+  void _paintBitmapCanvasShadow(
+      double elevation, Offset offset, bool transparentOccluder) {
     final SurfacePath path = SurfacePath()
       ..addRect(const Rect.fromLTRB(0, 0, 20, 20));
     builder.pushOffset(offset.dx, offset.dy);
 
-    final EnginePictureRecorder recorder = PictureRecorder();
+    final EnginePictureRecorder recorder = EnginePictureRecorder();
     final RecordingCanvas canvas = recorder.beginRecording(Rect.largest);
     canvas
         .debugEnforceArbitraryPaint(); // make sure DOM canvas doesn't take over
@@ -101,7 +106,7 @@ void main() async {
       ..close();
     builder.pushOffset(offset.dx, offset.dy);
 
-    final EnginePictureRecorder recorder = PictureRecorder();
+    final EnginePictureRecorder recorder = EnginePictureRecorder();
     final RecordingCanvas canvas = recorder.beginRecording(Rect.largest);
     canvas
         .debugEnforceArbitraryPaint(); // make sure DOM canvas doesn't take over
@@ -151,16 +156,27 @@ void main() async {
 
       builder.pop();
 
-      final html.Element sceneElement = builder.build().webOnlyRootElement;
-      html.document.body.append(sceneElement);
+      final html.Element sceneElement = builder.build().webOnlyRootElement!;
+      html.document.body!.append(sceneElement);
 
       await matchGoldenFile(
         'shadows.png',
         region: region,
-        maxDiffRatePercent: 0.0,
+        maxDiffRatePercent: 0.23,
         pixelComparison: PixelComparison.precise,
       );
     },
     testOn: 'chrome',
   );
+
+  /// For dart testing having `no tests ran` in a file is considered an error
+  /// and result in exit code 1.
+  /// See: https://github.com/dart-lang/test/pull/1173
+  ///
+  /// Since screenshot tests run one by one and exit code is checked immediately
+  /// after that a test file that only runs in chrome will break the other
+  /// browsers. This method is added as a bandaid solution.
+  test('dummy tests to pass on other browsers', () async {
+    expect(2 + 2, 4);
+  });
 }

@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// @dart = 2.9
 
+// @dart = 2.12
 part of dart.ui;
 
 /// How the pointer has changed since the last report.
@@ -56,7 +56,7 @@ enum PointerDeviceKind {
   unknown
 }
 
-/// The kind of [PointerDeviceKind.signal].
+/// The kind of pointer signal event.
 enum PointerSignalKind {
   /// The event is not associated with a pointer signal.
   none,
@@ -306,7 +306,7 @@ class PointerData {
 /// A sequence of reports about the state of pointers.
 class PointerDataPacket {
   /// Creates a packet of pointer data reports.
-  const PointerDataPacket({ this.data = const <PointerData>[] }) : assert(data != null); // ignore: unnecessary_null_comparison
+  const PointerDataPacket({ this.data = const <PointerData>[] }) : assert(data != null);
 
   /// Data about the individual pointers in this packet.
   ///

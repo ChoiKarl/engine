@@ -1,7 +1,6 @@
 // Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-// FLUTTER_NOLINT
 
 #include "flutter/flow/paint_utils.h"
 
@@ -21,7 +20,8 @@ sk_sp<SkShader> CreateCheckerboardShader(SkColor c1, SkColor c2, int size) {
   bm.eraseColor(c1);
   bm.eraseArea(SkIRect::MakeLTRB(0, 0, size, size), c2);
   bm.eraseArea(SkIRect::MakeLTRB(size, size, 2 * size, 2 * size), c2);
-  return bm.makeShader(SkTileMode::kRepeat, SkTileMode::kRepeat);
+  return bm.makeShader(SkTileMode::kRepeat, SkTileMode::kRepeat,
+                       SkSamplingOptions());
 }
 
 }  // anonymous namespace

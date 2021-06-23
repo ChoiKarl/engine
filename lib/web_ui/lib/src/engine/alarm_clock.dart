@@ -2,7 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-part of engine;
+import 'dart:async';
+
+import 'package:ui/ui.dart' as ui;
 
 /// A function that returns current system time.
 typedef TimestampFunction = DateTime Function();
@@ -87,10 +89,8 @@ class AlarmClock {
   }
 
   void _cancelTimer() {
-    if (_timer != null) {
-      _timer!.cancel();
-      _timer = null;
-    }
+    _timer?.cancel();
+    _timer = null;
   }
 
   void _timerDidFire() {

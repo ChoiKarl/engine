@@ -1,12 +1,11 @@
 // Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-// FLUTTER_NOLINT
 
 #include "flutter/runtime/dart_service_isolate.h"
 
-#include <string.h>
 #include <algorithm>
+#include <cstring>
 
 #include "flutter/fml/logging.h"
 #include "flutter/fml/posix_wrappers.h"
@@ -202,6 +201,7 @@ bool DartServiceIsolate::Startup(std::string server_ip,
   result = Dart_SetField(
       library, Dart_NewStringFromCString("_enableServicePortFallback"),
       Dart_NewBoolean(enable_service_port_fallback));
+  SHUTDOWN_ON_ERROR(result);
   return true;
 }
 

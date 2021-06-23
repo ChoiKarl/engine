@@ -2,20 +2,24 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// @dart = 2.6
 import 'dart:html' as html;
 import 'dart:math' as math;
 import 'dart:js_util' as js_util;
 
+import 'package:test/bootstrap/browser.dart';
+import 'package:test/test.dart';
 import 'package:ui/ui.dart';
 import 'package:ui/src/engine.dart';
-import 'package:test/test.dart';
 
 import 'package:web_engine_tester/golden_tester.dart';
 
 import 'scuba.dart';
 
-void main() async {
+void main() {
+  internalBootstrapBrowserTest(() => testMain);
+}
+
+void testMain() async {
   const double screenWidth = 600.0;
   const double screenHeight = 800.0;
   const Rect screenRect = Rect.fromLTWH(0, 0, screenWidth, screenHeight);
@@ -23,8 +27,10 @@ void main() async {
   // Commit a recording canvas to a bitmap, and compare with the expected
   Future<void> _checkScreenshot(RecordingCanvas rc, String fileName,
       {Rect region = const Rect.fromLTWH(0, 0, 500, 500),
-        double maxDiffRatePercent = 0.0}) async {
-    final EngineCanvas engineCanvas = BitmapCanvas(screenRect);
+      double maxDiffRatePercent = 0.0, bool setupPerspective = false,
+        bool write = false}) async {
+    final EngineCanvas engineCanvas = BitmapCanvas(screenRect,
+        RenderStrategy());
 
     rc.endRecording();
     rc.apply(engineCanvas, screenRect);
@@ -32,10 +38,18 @@ void main() async {
     // Wrap in <flt-scene> so that our CSS selectors kick in.
     final html.Element sceneElement = html.Element.tag('flt-scene');
     try {
+      if (setupPerspective) {
+        // iFrame disables perspective, set it explicitly for test.
+        engineCanvas.rootElement.style.perspective = '400px';
+        for (html.Element element in engineCanvas.rootElement.querySelectorAll(
+            'div')) {
+          element.style.perspective = '400px';
+        }
+      }
       sceneElement.append(engineCanvas.rootElement);
-      html.document.body.append(sceneElement);
+      html.document.body!.append(sceneElement);
       await matchGoldenFile('$fileName.png',
-          region: region, maxDiffRatePercent: maxDiffRatePercent);
+          region: region, maxDiffRatePercent: maxDiffRatePercent, write: write);
     } finally {
       // The page is reused across tests, so remove the element after taking the
       // Scuba screenshot.
@@ -53,7 +67,7 @@ void main() async {
     final RecordingCanvas rc =
         RecordingCanvas(const Rect.fromLTRB(0, 0, 400, 300));
     rc.save();
-    rc.drawImage(createTestImage(), Offset(0, 0), new Paint());
+    rc.drawImage(createTestImage(), Offset(0, 0), SurfacePaint());
     rc.restore();
     await _checkScreenshot(rc, 'draw_image');
   });
@@ -64,7 +78,7 @@ void main() async {
     rc.save();
     rc.translate(50.0, 100.0);
     rc.rotate(math.pi / 4.0);
-    rc.drawImage(createTestImage(), Offset(0, 0), new Paint());
+    rc.drawImage(createTestImage(), Offset(0, 0), SurfacePaint());
     rc.restore();
     await _checkScreenshot(rc, 'draw_image_with_transform');
   });
@@ -75,7 +89,7 @@ void main() async {
     rc.save();
     rc.translate(50.0, 100.0);
     rc.rotate(math.pi / 4.0);
-    rc.drawImage(createTestImage(), Offset(30, 20), new Paint());
+    rc.drawImage(createTestImage(), Offset(30, 20), SurfacePaint());
     rc.restore();
     await _checkScreenshot(rc, 'draw_image_with_transform_and_offset');
   });
@@ -90,7 +104,7 @@ void main() async {
     double testWidth = testImage.width.toDouble();
     double testHeight = testImage.height.toDouble();
     rc.drawImageRect(testImage, Rect.fromLTRB(0, 0, testWidth, testHeight),
-        Rect.fromLTRB(100, 30, 2 * testWidth, 2 * testHeight), new Paint());
+        Rect.fromLTRB(100, 30, 2 * testWidth, 2 * testHeight), SurfacePaint());
     rc.restore();
     await _checkScreenshot(rc, 'draw_image_rect_with_transform');
   });
@@ -106,7 +120,7 @@ void main() async {
         testImage,
         Rect.fromLTRB(testWidth / 2, 0, testWidth, testHeight),
         Rect.fromLTRB(100, 30, 2 * testWidth, 2 * testHeight),
-        new Paint());
+        SurfacePaint());
     rc.restore();
     await _checkScreenshot(rc, 'draw_image_rect_with_source');
   });
@@ -124,7 +138,7 @@ void main() async {
         testImage,
         Rect.fromLTRB(testWidth / 2, 0, testWidth, testHeight),
         Rect.fromLTRB(100, 30, 2 * testWidth, 2 * testHeight),
-        new Paint());
+        SurfacePaint());
     rc.restore();
     await _checkScreenshot(rc, 'draw_image_rect_with_source_and_clip');
   });
@@ -142,7 +156,7 @@ void main() async {
         testImage,
         Rect.fromLTRB(testWidth / 2, 0, testWidth, testHeight),
         Rect.fromLTRB(100, 30, 2 * testWidth, 2 * testHeight),
-        new Paint());
+        SurfacePaint());
     rc.restore();
     await _checkScreenshot(rc, 'draw_image_rect_with_transform_source');
   });
@@ -157,11 +171,11 @@ void main() async {
     double testWidth = testImage.width.toDouble();
     double testHeight = testImage.height.toDouble();
     rc.drawImageRect(testImage, Rect.fromLTRB(0, 0, testWidth, testHeight),
-        Rect.fromLTRB(100, 30, 2 * testWidth, 2 * testHeight), new Paint());
+        Rect.fromLTRB(100, 30, 2 * testWidth, 2 * testHeight), SurfacePaint());
     rc.drawCircle(
         Offset(100, 100),
         50.0,
-        Paint()
+        SurfacePaint()
           ..strokeWidth = 3
           ..color = Color.fromARGB(128, 0, 0, 0));
     rc.restore();
@@ -180,11 +194,11 @@ void main() async {
     rc.drawCircle(
         Offset(100, 100),
         50.0,
-        Paint()
+        SurfacePaint()
           ..strokeWidth = 3
           ..color = Color.fromARGB(128, 0, 0, 0));
     rc.drawImageRect(testImage, Rect.fromLTRB(0, 0, testWidth, testHeight),
-        Rect.fromLTRB(100, 30, 2 * testWidth, 2 * testHeight), new Paint());
+        Rect.fromLTRB(100, 30, 2 * testWidth, 2 * testHeight), SurfacePaint());
     rc.restore();
     await _checkScreenshot(rc, 'draw_circle_below_image');
   });
@@ -198,13 +212,13 @@ void main() async {
     Image testImage = createTestImage();
     double testWidth = testImage.width.toDouble();
     double testHeight = testImage.height.toDouble();
-    rc.clipRect(Rect.fromLTRB(75, 75, 160, 160));
+    rc.clipRect(Rect.fromLTRB(75, 75, 160, 160), ClipOp.intersect);
     rc.drawImageRect(testImage, Rect.fromLTRB(0, 0, testWidth, testHeight),
-        Rect.fromLTRB(100, 30, 2 * testWidth, 2 * testHeight), new Paint());
+        Rect.fromLTRB(100, 30, 2 * testWidth, 2 * testHeight), SurfacePaint());
     rc.drawCircle(
         Offset(100, 100),
         50.0,
-        Paint()
+        SurfacePaint()
           ..strokeWidth = 3
           ..color = Color.fromARGB(128, 0, 0, 0));
     rc.restore();
@@ -224,13 +238,13 @@ void main() async {
     rc.translate(100, 100);
     rc.rotate(math.pi / 4.0);
     rc.translate(-100, -100);
-    rc.clipRect(Rect.fromLTRB(75, 75, 160, 160));
+    rc.clipRect(Rect.fromLTRB(75, 75, 160, 160), ClipOp.intersect);
     rc.drawImageRect(testImage, Rect.fromLTRB(0, 0, testWidth, testHeight),
-        Rect.fromLTRB(100, 30, 2 * testWidth, 2 * testHeight), new Paint());
+        Rect.fromLTRB(100, 30, 2 * testWidth, 2 * testHeight), SurfacePaint());
     rc.drawCircle(
         Offset(100, 100),
         50.0,
-        Paint()
+        SurfacePaint()
           ..strokeWidth = 3
           ..color = Color.fromARGB(128, 0, 0, 0));
     rc.restore();
@@ -251,13 +265,13 @@ void main() async {
     rc.rotate(-math.pi / 4.0);
     rc.save();
     rc.translate(-100, -100);
-    rc.clipRect(Rect.fromLTRB(75, 75, 160, 160));
+    rc.clipRect(Rect.fromLTRB(75, 75, 160, 160), ClipOp.intersect);
     rc.drawImageRect(testImage, Rect.fromLTRB(0, 0, testWidth, testHeight),
-        Rect.fromLTRB(100, 30, 2 * testWidth, 2 * testHeight), new Paint());
+        Rect.fromLTRB(100, 30, 2 * testWidth, 2 * testHeight), SurfacePaint());
     rc.drawCircle(
         Offset(100, 100),
         50.0,
-        Paint()
+        SurfacePaint()
           ..strokeWidth = 3
           ..color = Color.fromARGB(128, 0, 0, 0));
     rc.restore();
@@ -276,11 +290,11 @@ void main() async {
     double testHeight = testImage.height.toDouble();
     rc.clipRRect(RRect.fromLTRBR(75, 75, 160, 160, Radius.circular(5)));
     rc.drawImageRect(testImage, Rect.fromLTRB(0, 0, testWidth, testHeight),
-        Rect.fromLTRB(100, 30, 2 * testWidth, 2 * testHeight), Paint());
+        Rect.fromLTRB(100, 30, 2 * testWidth, 2 * testHeight), SurfacePaint());
     rc.drawCircle(
         Offset(100, 100),
         50.0,
-        Paint()
+        SurfacePaint()
           ..strokeWidth = 3
           ..color = Color.fromARGB(128, 0, 0, 0));
     rc.restore();
@@ -303,11 +317,11 @@ void main() async {
     path.lineTo(160, 160);
     rc.clipPath(path);
     rc.drawImageRect(testImage, Rect.fromLTRB(0, 0, testWidth, testHeight),
-        Rect.fromLTRB(100, 30, 2 * testWidth, 2 * testHeight), Paint());
+        Rect.fromLTRB(100, 30, 2 * testWidth, 2 * testHeight), SurfacePaint());
     rc.drawCircle(
         Offset(100, 100),
         50.0,
-        Paint()
+        SurfacePaint()
           ..strokeWidth = 3
           ..color = Color.fromARGB(128, 0, 0, 0));
     rc.restore();
@@ -319,32 +333,40 @@ void main() async {
   // Yellow text should be behind image and rectangle.
   // Cyan text should be above everything.
   test('Paints text above and below image', () async {
+    // Use a non-Ahem font so that text is visible.
+    debugEmulateFlutterTesterEnvironment = false;
     final RecordingCanvas rc =
         RecordingCanvas(const Rect.fromLTRB(0, 0, 400, 300));
     rc.save();
     Image testImage = createTestImage();
     double testWidth = testImage.width.toDouble();
     double testHeight = testImage.height.toDouble();
+    final Color orange = Color(0xFFFF9800);
     final Paragraph paragraph1 = createTestParagraph(
-        'should be below...............',
-        color: Color(0xFFFFFF40));
+        'Should be below below below below below',
+        color: orange);
     paragraph1.layout(const ParagraphConstraints(width: 400.0));
     rc.drawParagraph(paragraph1, const Offset(20, 100));
     rc.drawImageRect(testImage, Rect.fromLTRB(0, 0, testWidth, testHeight),
-        Rect.fromLTRB(100, 100, 200, 200), Paint());
+        Rect.fromLTRB(100, 100, 200, 200), SurfacePaint());
     rc.drawRect(
         Rect.fromLTWH(50, 50, 100, 200),
-        Paint()
+        SurfacePaint()
           ..strokeWidth = 3
           ..color = Color(0xA0000000));
+    final Color cyan = Color(0xFF0097A7);
     final Paragraph paragraph2 = createTestParagraph(
-        'Should be above...............',
-        color: Color(0xFF00FFFF));
+        'Should be above above above above above',
+        color: cyan);
     paragraph2.layout(const ParagraphConstraints(width: 400.0));
     rc.drawParagraph(paragraph2, const Offset(20, 150));
     rc.restore();
-    await _checkScreenshot(rc, 'draw_text_composite_order_below',
-        maxDiffRatePercent: 1.0);
+    await _checkScreenshot(
+      rc,
+      'draw_text_composite_order_below',
+      maxDiffRatePercent: 1.0,
+      region: Rect.fromLTWH(0, 0, 350, 300),
+    );
   });
 
   // Creates a picture
@@ -353,9 +375,9 @@ void main() async {
     EnginePictureRecorder recorder = EnginePictureRecorder();
     final Canvas canvas = Canvas(recorder, region);
     Image testImage = createNineSliceImage();
-    canvas.clipRect(Rect.fromLTWH(0, 0,420, 200));
+    canvas.clipRect(Rect.fromLTWH(0, 0, 420, 200));
     canvas.drawImageNine(testImage, Rect.fromLTWH(20, 20, 20, 20),
-        Rect.fromLTWH(20, 20, 400, 400), Paint());
+        Rect.fromLTWH(20, 20, 400, 400), SurfacePaint());
     Picture picture = recorder.endRecording();
 
     final SurfaceSceneBuilder builder = SurfaceSceneBuilder();
@@ -364,8 +386,8 @@ void main() async {
     // Wrap in <flt-scene> so that our CSS selectors kick in.
     final html.Element sceneElement = html.Element.tag('flt-scene');
     try {
-      sceneElement.append(builder.build().webOnlyRootElement);
-      html.document.body.append(sceneElement);
+      sceneElement.append(builder.build().webOnlyRootElement!);
+      html.document.body!.append(sceneElement);
       await matchGoldenFile('draw_nine_slice.png',
           region: region, maxDiffRatePercent: 0);
     } finally {
@@ -373,6 +395,212 @@ void main() async {
       // Scuba screenshot.
       sceneElement.remove();
     }
+  });
+
+  // Regression test for https://github.com/flutter/flutter/issues/78068
+  // Tests for correct behavior when using drawImageNine with a destination
+  // size that is too small to render the center portion of the original image.
+  test('Paints nine slice image', () async {
+    Rect region = const Rect.fromLTWH(0, 0, 100, 100);
+    EnginePictureRecorder recorder = EnginePictureRecorder();
+    final Canvas canvas = Canvas(recorder, region);
+    Image testImage = createNineSliceImage();
+    canvas.clipRect(Rect.fromLTWH(0, 0, 100, 100));
+    // The testImage is 60x60 and the center slice is 20x20 so the edges
+    // of the image are 40x40. Drawing into a destination that is smaller
+    // than that will not provide enough room to draw the center portion.
+    canvas.drawImageNine(testImage, Rect.fromLTWH(20, 20, 20, 20),
+        Rect.fromLTWH(20, 20, 36, 36), SurfacePaint());
+    Picture picture = recorder.endRecording();
+
+    final SurfaceSceneBuilder builder = SurfaceSceneBuilder();
+    builder.addPicture(Offset(0, 0), picture);
+
+    // Wrap in <flt-scene> so that our CSS selectors kick in.
+    final html.Element sceneElement = html.Element.tag('flt-scene');
+    try {
+      sceneElement.append(builder.build().webOnlyRootElement!);
+      html.document.body!.append(sceneElement);
+      await matchGoldenFile('draw_nine_slice_empty_center.png',
+          region: region, maxDiffRatePercent: 0);
+    } finally {
+      // The page is reused across tests, so remove the element after taking the
+      // Scuba screenshot.
+      sceneElement.remove();
+    }
+  });
+
+  // Regression test for https://github.com/flutter/flutter/issues/61691
+  //
+  // The bug in bitmap_canvas.dart was that when we transformed and clipped
+  // the image we did not apply `transform-origin: 0 0 0` to the clipping
+  // element which resulted in an undesirable offset.
+  test('Paints clipped and transformed image', () async {
+    final Rect region = const Rect.fromLTRB(0, 0, 60, 70);
+    final RecordingCanvas canvas = RecordingCanvas(region);
+    canvas.translate(10, 10);
+    canvas.transform(Matrix4.rotationZ(0.4).storage);
+    canvas.clipPath(Path()
+      ..moveTo(10, 10)
+      ..lineTo(50, 10)
+      ..lineTo(50, 30)
+      ..lineTo(10, 30)
+      ..close());
+    canvas.drawImage(createNineSliceImage(), Offset.zero, SurfacePaint());
+    await _checkScreenshot(canvas, 'draw_clipped_and_transformed_image',
+        region: region, maxDiffRatePercent: 1.0);
+  });
+
+  /// Regression test for https://github.com/flutter/flutter/issues/61245
+  test('Should render image with perspective', () async {
+    final Rect region = const Rect.fromLTRB(0, 0, 200, 200);
+    final RecordingCanvas canvas = RecordingCanvas(region);
+    canvas.translate(10, 10);
+    canvas.drawImage(createTestImage(), Offset(0, 0), SurfacePaint());
+    Matrix4 transform = Matrix4.identity()
+      ..setRotationY(0.8)
+      ..setEntry(3, 2, 0.0005); // perspective
+    canvas.transform(transform.storage);
+    canvas.drawImage(createTestImage(), Offset(0, 100), SurfacePaint());
+    await _checkScreenshot(canvas, 'draw_3d_image',
+        region: region,
+        maxDiffRatePercent: 6.0,
+        setupPerspective: true);
+  });
+
+  /// Regression test for https://github.com/flutter/flutter/issues/61245
+  test('Should render image with perspective inside clip area', () async {
+    final Rect region = const Rect.fromLTRB(0, 0, 200, 200);
+    final RecordingCanvas canvas = RecordingCanvas(region);
+    canvas.drawRect(region, SurfacePaint()..color = Color(0xFFE0E0E0));
+    canvas.translate(10, 10);
+    canvas.drawImage(createTestImage(), Offset(0, 0), SurfacePaint());
+    Matrix4 transform = Matrix4.identity()
+      ..setRotationY(0.8)
+      ..setEntry(3, 2, 0.0005); // perspective
+    canvas.transform(transform.storage);
+    canvas.clipRect(region, ClipOp.intersect);
+    canvas.drawRect(Rect.fromLTWH(0, 0, 100, 200), SurfacePaint()..color = Color(0x801080E0));
+    canvas.drawImage(createTestImage(), Offset(0, 100), SurfacePaint());
+    canvas.drawRect(Rect.fromLTWH(50, 150, 50, 20), SurfacePaint()..color = Color(0x80000000));
+    await _checkScreenshot(canvas, 'draw_3d_image_clipped',
+        region: region,
+        maxDiffRatePercent: 5.0,
+        setupPerspective: true);
+  });
+
+  test('Should render rect with perspective transform', () async {
+    final Rect region = const Rect.fromLTRB(0, 0, 400, 400);
+    final RecordingCanvas canvas = RecordingCanvas(region);
+    canvas.drawRect(region, SurfacePaint()..color = Color(0xFFE0E0E0));
+    canvas.translate(20, 20);
+    canvas.drawRect(Rect.fromLTWH(0, 0, 100, 40),
+        SurfacePaint()..color = Color(0xFF000000));
+    Matrix4 transform = Matrix4.identity()
+      ..setRotationY(0.8)
+      ..setEntry(3, 2, 0.001); // perspective
+    canvas.transform(transform.storage);
+    canvas.clipRect(region, ClipOp.intersect);
+    canvas.drawRect(Rect.fromLTWH(0, 60, 120, 40), SurfacePaint()..color = Color(0x801080E0));
+    canvas.drawRect(Rect.fromLTWH(300, 250, 120, 40), SurfacePaint()..color = Color(0x80E010E0));
+    canvas.drawRRect(RRect.fromRectAndRadius(Rect.fromLTWH(0, 120, 160, 40), Radius.circular(5)),
+        SurfacePaint()..color = Color(0x801080E0));
+    canvas.drawRRect(RRect.fromRectAndRadius(Rect.fromLTWH(300, 320, 90, 40), Radius.circular(20)),
+        SurfacePaint()..color = Color(0x80E010E0));
+    await _checkScreenshot(canvas, 'draw_3d_rect_clipped',
+        region: region,
+        maxDiffRatePercent: 1.0,
+        setupPerspective: true);
+  });
+
+  test('Should render color and ovals with perspective transform', () async {
+    final Rect region = const Rect.fromLTRB(0, 0, 400, 400);
+    final RecordingCanvas canvas = RecordingCanvas(region);
+    canvas.drawRect(region, SurfacePaint()..color = Color(0xFFFF0000));
+    canvas.drawColor(Color(0xFFE0E0E0), BlendMode.src);
+    canvas.translate(20, 20);
+    canvas.drawRect(Rect.fromLTWH(0, 0, 100, 40),
+        SurfacePaint()..color = Color(0xFF000000));
+    Matrix4 transform = Matrix4.identity()
+      ..setRotationY(0.8)
+      ..setEntry(3, 2, 0.001); // perspective
+    canvas.transform(transform.storage);
+    canvas.clipRect(region, ClipOp.intersect);
+    canvas.drawOval(Rect.fromLTWH(0, 120, 130, 40),
+        SurfacePaint()..color = Color(0x801080E0));
+    canvas.drawOval(Rect.fromLTWH(300, 290, 90, 40),
+        SurfacePaint()..color = Color(0x80E010E0));
+    canvas.drawCircle(Offset(60, 240), 50, SurfacePaint()..color = Color(0x801080E0));
+    canvas.drawCircle(Offset(360, 370), 30, SurfacePaint()..color = Color(0x80E010E0));
+    await _checkScreenshot(canvas, 'draw_3d_oval_clipped',
+        region: region,
+        maxDiffRatePercent: 1.0,
+        setupPerspective: true);
+  });
+
+  test('Should render path with perspective transform', () async {
+    final Rect region = const Rect.fromLTRB(0, 0, 400, 400);
+    final RecordingCanvas canvas = RecordingCanvas(region);
+    canvas.drawRect(region, SurfacePaint()..color = Color(0xFFFF0000));
+    canvas.drawColor(Color(0xFFE0E0E0), BlendMode.src);
+    canvas.translate(20, 20);
+    canvas.drawRect(Rect.fromLTWH(0, 0, 100, 20),
+        SurfacePaint()..color = Color(0xFF000000));
+    Matrix4 transform = Matrix4.identity()
+      ..setRotationY(0.8)
+      ..setEntry(3, 2, 0.001); // perspective
+    canvas.transform(transform.storage);
+    canvas.drawRect(Rect.fromLTWH(0, 120, 130, 40),
+        SurfacePaint()..color = Color(0x801080E0));
+    canvas.drawOval(Rect.fromLTWH(300, 290, 90, 40),
+        SurfacePaint()..color = Color(0x80E010E0));
+    Path path = Path();
+    path.moveTo(50, 50);
+    path.lineTo(100, 50);
+    path.lineTo(100, 100);
+    path.close();
+    canvas.drawPath(path, SurfacePaint()..color = Color(0x801080E0));
+
+    canvas.drawCircle(Offset(50, 50), 4, SurfacePaint()..color = Color(0xFF000000));
+    canvas.drawCircle(Offset(100, 100), 4, SurfacePaint()..color = Color(0xFF000000));
+    canvas.drawCircle(Offset(100, 50), 4, SurfacePaint()..color = Color(0xFF000000));
+    await _checkScreenshot(canvas, 'draw_3d_path',
+        region: region,
+        maxDiffRatePercent: 1.0,
+        setupPerspective: true);
+  });
+
+  test('Should render path with perspective transform', () async {
+    final Rect region = const Rect.fromLTRB(0, 0, 400, 400);
+    final RecordingCanvas canvas = RecordingCanvas(region);
+    canvas.drawRect(region, SurfacePaint()..color = Color(0xFFFF0000));
+    canvas.drawColor(Color(0xFFE0E0E0), BlendMode.src);
+    canvas.translate(20, 20);
+    canvas.drawRect(Rect.fromLTWH(0, 0, 100, 20),
+        SurfacePaint()..color = Color(0xFF000000));
+    Matrix4 transform = Matrix4.identity()
+      ..setRotationY(0.8)
+      ..setEntry(3, 2, 0.001); // perspective
+    canvas.transform(transform.storage);
+    //canvas.clipRect(region, ClipOp.intersect);
+    canvas.drawRect(Rect.fromLTWH(0, 120, 130, 40),
+        SurfacePaint()..color = Color(0x801080E0));
+    canvas.drawOval(Rect.fromLTWH(300, 290, 90, 40),
+        SurfacePaint()..color = Color(0x80E010E0));
+    Path path = Path();
+    path.moveTo(50, 50);
+    path.lineTo(100, 50);
+    path.lineTo(100, 100);
+    path.close();
+    canvas.drawPath(path, SurfacePaint()..color = Color(0x801080E0));
+
+    canvas.drawCircle(Offset(50, 50), 4, SurfacePaint()..color = Color(0xFF000000));
+    canvas.drawCircle(Offset(100, 100), 4, SurfacePaint()..color = Color(0xFF000000));
+    canvas.drawCircle(Offset(100, 50), 4, SurfacePaint()..color = Color(0xFF000000));
+    await _checkScreenshot(canvas, 'draw_3d_path_clipped',
+        region: region,
+        maxDiffRatePercent: 1.0,
+        setupPerspective: true);
   });
 }
 
@@ -508,13 +736,11 @@ const String base64ImageData = 'data:image/png;base64,iVBORw0KGgoAAAANSUh'
 
 HtmlImage createNineSliceImage() {
   return HtmlImage(
-    html.ImageElement()
-      ..src = base64ImageData,
+    html.ImageElement()..src = base64ImageData,
     60,
     60,
   );
 }
-
 
 HtmlImage createTestImage({int width = 100, int height = 50}) {
   html.CanvasElement canvas =
@@ -537,7 +763,7 @@ HtmlImage createTestImage({int width = 100, int height = 50}) {
 Paragraph createTestParagraph(String text,
     {Color color = const Color(0xFF000000)}) {
   final ParagraphBuilder builder = ParagraphBuilder(ParagraphStyle(
-    fontFamily: 'Ahem',
+    fontFamily: 'Roboto',
     fontStyle: FontStyle.normal,
     fontWeight: FontWeight.normal,
     fontSize: 14.0,

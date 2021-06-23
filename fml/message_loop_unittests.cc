@@ -1,22 +1,22 @@
 // Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-// FLUTTER_NOLINT
 
 #define FML_USED_ON_EMBEDDER
+
+#include "flutter/fml/message_loop.h"
 
 #include <iostream>
 #include <thread>
 
 #include "flutter/fml/build_config.h"
 #include "flutter/fml/concurrent_message_loop.h"
-#include "flutter/fml/message_loop.h"
 #include "flutter/fml/synchronization/count_down_latch.h"
 #include "flutter/fml/synchronization/waitable_event.h"
 #include "flutter/fml/task_runner.h"
 #include "gtest/gtest.h"
 
-#define TIME_SENSITIVE(x) TimeSensitiveTest_##x
+#define TIMESENSITIVE(x) TimeSensitiveTest_##x
 #if OS_WIN
 #define PLATFORM_SPECIFIC_CAPTURE(...) [ __VA_ARGS__, count ]
 #else
@@ -154,7 +154,7 @@ TEST(MessageLoop, CheckRunsTaskOnCurrentThread) {
   thread.join();
 }
 
-TEST(MessageLoop, TIME_SENSITIVE(SingleDelayedTaskByDelta)) {
+TEST(MessageLoop, TIMESENSITIVE(SingleDelayedTaskByDelta)) {
   bool checked = false;
   std::thread thread([&checked]() {
     fml::MessageLoop::EnsureInitializedForCurrentThread();
@@ -176,7 +176,7 @@ TEST(MessageLoop, TIME_SENSITIVE(SingleDelayedTaskByDelta)) {
   ASSERT_TRUE(checked);
 }
 
-TEST(MessageLoop, TIME_SENSITIVE(SingleDelayedTaskForTime)) {
+TEST(MessageLoop, TIMESENSITIVE(SingleDelayedTaskForTime)) {
   bool checked = false;
   std::thread thread([&checked]() {
     fml::MessageLoop::EnsureInitializedForCurrentThread();
@@ -198,7 +198,7 @@ TEST(MessageLoop, TIME_SENSITIVE(SingleDelayedTaskForTime)) {
   ASSERT_TRUE(checked);
 }
 
-TEST(MessageLoop, TIME_SENSITIVE(MultipleDelayedTasksWithIncreasingDeltas)) {
+TEST(MessageLoop, TIMESENSITIVE(MultipleDelayedTasksWithIncreasingDeltas)) {
   const auto count = 10;
   int checked = false;
   std::thread thread(PLATFORM_SPECIFIC_CAPTURE(&checked)() {
@@ -225,7 +225,7 @@ TEST(MessageLoop, TIME_SENSITIVE(MultipleDelayedTasksWithIncreasingDeltas)) {
   ASSERT_EQ(checked, count);
 }
 
-TEST(MessageLoop, TIME_SENSITIVE(MultipleDelayedTasksWithDecreasingDeltas)) {
+TEST(MessageLoop, TIMESENSITIVE(MultipleDelayedTasksWithDecreasingDeltas)) {
   const auto count = 10;
   int checked = false;
   std::thread thread(PLATFORM_SPECIFIC_CAPTURE(&checked)() {

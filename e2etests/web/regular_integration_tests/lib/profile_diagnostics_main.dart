@@ -3,13 +3,14 @@
 // found in the LICENSE file.
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 void main() {
-  runApp(MyApp());
+  runApp(const MyApp());
 }
 
 class MyApp extends StatefulWidget {
+  const MyApp({Key? key}) : super(key: key);
+
   @override
   MyAppState createState() => MyAppState();
 }
@@ -20,6 +21,6 @@ class MyAppState extends State<MyApp> {
   Widget build(BuildContext context) {
     // cause cast error.
     print(kMessage as int);
-    return Text('Hello');
+    return const Text('Hello');
   }
 }

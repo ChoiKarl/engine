@@ -4,21 +4,24 @@
 
 import 'package:flutter/material.dart';
 
-void main() => runApp(MyApp());
+void main() => runApp(const MyApp());
 
 class MyApp extends StatelessWidget {
+  const MyApp({Key? key}) : super(key: key);
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       key: const Key('mainapp'),
+      theme: ThemeData(fontFamily: 'RobotoMono'),
       title: 'Integration Test App',
-      home: MyHomePage(title: 'Integration Test App'),
+      home: const MyHomePage(title: 'Integration Test App'),
     );
   }
 }
 
 class MyHomePage extends StatefulWidget {
-  MyHomePage({Key key, this.title}) : super(key: key);
+  const MyHomePage({Key? key, required this.title}) : super(key: key);
 
   final String title;
 
@@ -29,7 +32,7 @@ class MyHomePage extends StatefulWidget {
 class _MyHomePageState extends State<MyHomePage> {
   String infoText = 'no-enter';
 
-  // Controller with no inital value;
+  // Controller with no initial value;
   final TextEditingController _emptyController = TextEditingController();
 
   final TextEditingController _controller =
@@ -56,6 +59,7 @@ class _MyHomePageState extends State<MyHomePage> {
               enabled: true,
               controller: _emptyController,
               decoration: const InputDecoration(
+                contentPadding: EdgeInsets.all(10.0),
                 labelText: 'Empty Input Field:',
               ),
             ),
@@ -67,6 +71,7 @@ class _MyHomePageState extends State<MyHomePage> {
               enabled: true,
               controller: _controller,
               decoration: const InputDecoration(
+                contentPadding: EdgeInsets.all(10.0),
                 labelText: 'Text Input Field:',
               ),
             ),
@@ -78,6 +83,7 @@ class _MyHomePageState extends State<MyHomePage> {
               enabled: true,
               controller: _controller2,
               decoration: const InputDecoration(
+                contentPadding: EdgeInsets.all(10.0),
                 labelText: 'Text Input Field 2:',
               ),
               onFieldSubmitted: (String str) {
@@ -88,6 +94,14 @@ class _MyHomePageState extends State<MyHomePage> {
             Text(
               infoText,
               key: const Key('text'),
+            ),
+            const Padding(
+              padding: EdgeInsets.all(12.0),
+              child: SelectableText(
+                'Lorem ipsum dolor sit amet',
+                key: Key('selectable'),
+                style: TextStyle(fontFamily: 'RobotoMono', fontSize: 20.0),
+              ),
             ),
           ],
         ),

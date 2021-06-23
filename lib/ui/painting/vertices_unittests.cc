@@ -1,11 +1,13 @@
 // Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-// FLUTTER_NOLINT
+
+#include "flutter/lib/ui/painting/vertices.h"
+
+#include <memory>
 
 #include "flutter/common/task_runners.h"
 #include "flutter/fml/synchronization/waitable_event.h"
-#include "flutter/lib/ui/painting/vertices.h"
 #include "flutter/runtime/dart_vm.h"
 #include "flutter/shell/common/shell_test.h"
 #include "flutter/shell/common/thread_host.h"
@@ -15,9 +17,9 @@ namespace flutter {
 namespace testing {
 
 TEST_F(ShellTest, VerticesAccuratelyReportsSize) {
-  fml::AutoResetWaitableEvent message_latch;
+  auto message_latch = std::make_shared<fml::AutoResetWaitableEvent>();
 
-  auto nativeValidateVertices = [&](Dart_NativeArguments args) {
+  auto nativeValidateVertices = [message_latch](Dart_NativeArguments args) {
     auto handle = Dart_GetNativeArgument(args, 0);
     intptr_t peer = 0;
     Dart_Handle result = Dart_GetNativeInstanceField(
@@ -29,7 +31,7 @@ TEST_F(ShellTest, VerticesAccuratelyReportsSize) {
     // macOS as of the test writing is 1441890ul. Just need to assert it's
     // big enough to get the Dart GC's attention.
     ASSERT_GT(vertices->GetAllocationSize(), 1300000ul);
-    message_latch.Signal();
+    message_latch->Signal();
   };
 
   Settings settings = CreateSettingsForFixture();
@@ -50,11 +52,11 @@ TEST_F(ShellTest, VerticesAccuratelyReportsSize) {
   auto configuration = RunConfiguration::InferFromSettings(settings);
   configuration.SetEntrypoint("createVertices");
 
-  shell->RunEngine(std::move(configuration), [&](auto result) {
+  shell->RunEngine(std::move(configuration), [](auto result) {
     ASSERT_EQ(result, Engine::RunStatus::Success);
   });
 
-  message_latch.Wait();
+  message_latch->Wait();
   DestroyShell(std::move(shell), std::move(task_runners));
 }
 

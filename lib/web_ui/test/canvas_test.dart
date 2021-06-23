@@ -2,35 +2,38 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// @dart = 2.6
 import 'package:ui/src/engine.dart';
 import 'package:ui/ui.dart' as ui;
 
+import 'package:test/bootstrap/browser.dart';
 import 'package:test/test.dart';
 
 import 'mock_engine_canvas.dart';
 
 void main() {
+  internalBootstrapBrowserTest(() => testMain);
+}
+
+void testMain() {
   setUpAll(() {
     WebExperiments.ensureInitialized();
   });
 
   group('EngineCanvas', () {
-    MockEngineCanvas mockCanvas;
-    ui.Paragraph paragraph;
+    late MockEngineCanvas mockCanvas;
+    late ui.Paragraph paragraph;
 
     void testCanvas(
-        String description, void Function(EngineCanvas canvas) testFn,
-        {ui.Rect canvasSize, ui.VoidCallback whenDone}) {
-      canvasSize ??= const ui.Rect.fromLTWH(0, 0, 100, 100);
+      String description,
+      void Function(EngineCanvas canvas) testFn, {
+      ui.Rect canvasSize = const ui.Rect.fromLTWH(0, 0, 100, 100),
+      ui.VoidCallback? whenDone,
+    }) {
       test(description, () {
-        testFn(BitmapCanvas(canvasSize));
-        testFn(DomCanvas());
-        testFn(HoudiniCanvas(canvasSize));
+        testFn(BitmapCanvas(canvasSize, RenderStrategy()));
+        testFn(DomCanvas(domRenderer.createElement('flt-picture')));
         testFn(mockCanvas = MockEngineCanvas());
-        if (whenDone != null) {
-          whenDone();
-        }
+        whenDone?.call();
       });
     }
 

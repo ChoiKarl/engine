@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// @dart = 2.6
 import 'dart:io' as io;
 import 'package:path/path.dart' as pathlib;
 
@@ -10,11 +9,10 @@ import 'exceptions.dart';
 
 /// Contains various environment variables, such as common file paths and command-line options.
 Environment get environment {
-  _environment ??= Environment();
-  return _environment;
+  return _environment ??= Environment();
 }
 
-Environment _environment;
+Environment? _environment;
 
 /// Contains various environment variables, such as common file paths and command-line options.
 class Environment {
@@ -59,14 +57,14 @@ class Environment {
   }
 
   Environment._({
-    this.self,
-    this.webUiRootDir,
-    this.engineSrcDir,
-    this.engineToolsDir,
-    this.integrationTestsDir,
-    this.outDir,
-    this.hostDebugUnoptDir,
-    this.dartSdkDir,
+    required this.self,
+    required this.webUiRootDir,
+    required this.engineSrcDir,
+    required this.engineToolsDir,
+    required this.integrationTestsDir,
+    required this.outDir,
+    required this.hostDebugUnoptDir,
+    required this.dartSdkDir,
   });
 
   /// The Dart script that's currently running.
@@ -156,10 +154,30 @@ class Environment {
         'test',
       ));
 
+  /// Path to the "lib" directory containing web engine code.
+  io.Directory get webUiLibDir => io.Directory(pathlib.join(
+        webUiRootDir.path,
+        'lib',
+      ));
+
   /// Path to the clone of the flutter/goldens repository.
   io.Directory get webUiGoldensRepositoryDirectory => io.Directory(pathlib.join(
         webUiDartToolDir.path,
         'goldens',
+      ));
+
+  /// Directory to add test results which would later be uploaded to a gcs
+  /// bucket by LUCI.
+  io.Directory get webUiTestResultsDirectory => io.Directory(pathlib.join(
+        webUiDartToolDir.path,
+        'test_results',
+      ));
+
+  /// Path to the screenshots taken by iOS simulator.
+  io.Directory get webUiSimulatorScreenshotsDirectory =>
+      io.Directory(pathlib.join(
+        webUiDartToolDir.path,
+        'ios_screenshots',
       ));
 
   /// Path to the script that clones the Flutter repo.

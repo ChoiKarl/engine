@@ -18,7 +18,8 @@ class JNIMock final : public PlatformViewAndroidJNI {
  public:
   MOCK_METHOD(void,
               FlutterViewHandlePlatformMessage,
-              (fml::RefPtr<flutter::PlatformMessage> message, int responseId),
+              (std::unique_ptr<flutter::PlatformMessage> message,
+               int responseId),
               (override));
 
   MOCK_METHOD(void,
@@ -28,7 +29,9 @@ class JNIMock final : public PlatformViewAndroidJNI {
 
   MOCK_METHOD(void,
               FlutterViewUpdateSemantics,
-              (std::vector<uint8_t> buffer, std::vector<std::string> strings),
+              (std::vector<uint8_t> buffer,
+               std::vector<std::string> strings,
+               std::vector<std::vector<uint8_t>> string_attribute_args),
               (override));
 
   MOCK_METHOD(void,
@@ -92,6 +95,13 @@ class JNIMock final : public PlatformViewAndroidJNI {
   MOCK_METHOD(std::unique_ptr<std::vector<std::string>>,
               FlutterViewComputePlatformResolvedLocale,
               (std::vector<std::string> supported_locales_data),
+              (override));
+
+  MOCK_METHOD(double, GetDisplayRefreshRate, (), (override));
+
+  MOCK_METHOD(bool,
+              RequestDartDeferredLibrary,
+              (int loading_unit_id),
               (override));
 };
 

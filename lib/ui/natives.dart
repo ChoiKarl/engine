@@ -4,8 +4,8 @@
 
 // TODO(dnfield): remove unused_element ignores when https://github.com/dart-lang/sdk/issues/35164 is resolved.
 
-// @dart = 2.9
 
+// @dart = 2.12
 part of dart.ui;
 
 // Corelib 'print' implementation.
@@ -34,7 +34,7 @@ Future<developer.ServiceExtensionResponse> _scheduleFrame(
     Map<String, String> parameters
     ) async {
   // Schedule the frame.
-  window.scheduleFrame();
+  PlatformDispatcher.instance.scheduleFrame();
   // Always succeed.
   return developer.ServiceExtensionResponse.result(json.encode(<String, String>{
     'type': 'Success',
@@ -70,15 +70,10 @@ void _setupHooks() {  // ignore: unused_element
 ///
 /// This function is only effective in debug and dynamic modes, and will throw in AOT mode.
 List<int> saveCompilationTrace() {
-  final dynamic result = _saveCompilationTrace();
-  if (result is Error)
-    throw result;
-  return result as List<int>;
+  throw UnimplementedError();
 }
 
-dynamic _saveCompilationTrace() native 'SaveCompilationTrace';
-
-void _scheduleMicrotask(void callback()) native 'ScheduleMicrotask';
+void _scheduleMicrotask(void Function() callback) native 'ScheduleMicrotask';
 
 int? _getCallbackHandle(Function closure) native 'GetCallbackHandle';
 Function? _getCallbackFromHandle(int handle) native 'GetCallbackFromHandle';

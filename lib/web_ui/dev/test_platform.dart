@@ -2,11 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// @dart = 2.6
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:math';
 
 import 'package:async/async.dart';
 import 'package:http_multi_server/http_multi_server.dart';
@@ -21,66 +21,66 @@ import 'package:shelf_web_socket/shelf_web_socket.dart';
 import 'package:shelf_packages_handler/shelf_packages_handler.dart';
 import 'package:stream_channel/stream_channel.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:web_test_utils/goldens.dart';
+import 'package:web_test_utils/image_compare.dart';
 
-import 'package:test_api/src/backend/runtime.dart'; // ignore: implementation_imports
-import 'package:test_api/src/backend/suite_platform.dart'; // ignore: implementation_imports
-import 'package:test_core/src/runner/runner_suite.dart'; // ignore: implementation_imports
-import 'package:test_core/src/runner/platform.dart'; // ignore: implementation_imports
-import 'package:test_core/src/util/stack_trace_mapper.dart'; // ignore: implementation_imports
-import 'package:test_api/src/utils.dart'; // ignore: implementation_imports
-import 'package:test_core/src/runner/suite.dart'; // ignore: implementation_imports
-import 'package:test_core/src/runner/plugin/platform_helpers.dart'; // ignore: implementation_imports
-import 'package:test_core/src/runner/environment.dart'; // ignore: implementation_imports
+import 'package:test_api/src/backend/runtime.dart';
+import 'package:test_api/src/backend/suite_platform.dart';
+import 'package:test_core/src/runner/runner_suite.dart';
+import 'package:test_core/src/runner/platform.dart';
+import 'package:test_core/src/util/stack_trace_mapper.dart';
+import 'package:test_core/src/runner/suite.dart';
+import 'package:test_core/src/runner/plugin/platform_helpers.dart';
+import 'package:test_core/src/runner/environment.dart';
 
-import 'package:test_core/src/util/io.dart'; // ignore: implementation_imports
-import 'package:test_core/src/runner/configuration.dart'; // ignore: implementation_imports
-import 'package:test_core/src/runner/load_exception.dart'; // ignore: implementation_imports
-import 'package:webkit_inspection_protocol/webkit_inspection_protocol.dart'
-    as wip;
+import 'package:test_core/src/util/io.dart';
+import 'package:test_core/src/runner/configuration.dart';
 
 import 'browser.dart';
 import 'common.dart';
 import 'environment.dart' as env;
-import 'goldens.dart';
+import 'screenshot_manager.dart';
 import 'supported_browsers.dart';
 
+/// Custom test platform that serves web engine unit tests.
 class BrowserPlatform extends PlatformPlugin {
   /// Starts the server.
   ///
-  /// [root] is the root directory that the server should serve. It defaults to
-  /// the working directory.
-  static Future<BrowserPlatform> start(String name,
-      {String root, bool doUpdateScreenshotGoldens: false}) async {
-    assert(SupportedBrowsers.instance.supportedBrowserNames.contains(name));
-    var server = shelf_io.IOServer(await HttpMultiServer.loopback(0));
+  /// [browserName] is the name of the browser that's used to run the test. It
+  /// must be supported by [SupportedBrowsers].
+  ///
+  /// If [doUpdateScreenshotGoldens] is true updates screenshot golden files
+  /// instead of failing the test on screenshot mismatches.
+  static Future<BrowserPlatform> start({
+    required String browserName,
+    required bool doUpdateScreenshotGoldens,
+  }) async {
+    assert(SupportedBrowsers.instance.supportedBrowserNames.contains(browserName));
+    final shelf_io.IOServer server = shelf_io.IOServer(await HttpMultiServer.loopback(0));
     return BrowserPlatform._(
-      name,
-      server,
-      Configuration.current,
-      p.fromUri(await Isolate.resolvePackageUri(
+      browserName: browserName,
+      server: server,
+      isDebug: Configuration.current.pauseAfterLoad,
+      faviconPath: p.fromUri(await Isolate.resolvePackageUri(
           Uri.parse('package:test/src/runner/browser/static/favicon.ico'))),
-      root: root,
       doUpdateScreenshotGoldens: doUpdateScreenshotGoldens,
+      packageConfig: await loadPackageConfigUri((await Isolate.packageConfig)!),
     );
   }
 
-  /// The test runner configuration.
-  final Configuration _config;
+  /// If true, runs the browser with a visible windows (i.e. not headless) and
+  /// pauses before running the tests to give the developer a chance to set
+  /// breakpoints in the code.
+  final bool isDebug;
 
   /// The underlying server.
-  final shelf.Server _server;
+  final shelf.Server server;
 
   /// Name for the running browser. Not final on purpose can be mutated later.
   String browserName;
 
-  /// A randomly-generated secret.
-  ///
-  /// This is used to ensure that other users on the same system can't snoop
-  /// on data being served through this server.
-  final _secret = Uri.encodeComponent(randomBase64(24));
-
   /// The URL for this server.
-  Uri get url => _server.url.resolve(_secret + '/');
+  Uri get url => server.url.resolve('/');
 
   /// A [OneOffHandler] for servicing WebSocket connections for
   /// [BrowserManager]s.
@@ -89,14 +89,10 @@ class BrowserPlatform extends PlatformPlugin {
   /// WebSocket,
   final OneOffHandler _webSocketHandler = OneOffHandler();
 
-  /// A [PathHandler] used to serve compiled JS.
-  final PathHandler _jsHandler = PathHandler();
-
-  /// The root directory served statically by this server.
-  final String _root;
-
-  /// The HTTP client to use when caching JS files in `pub serve`.
-  final HttpClient _http;
+  /// Handles taking screenshots during tests.
+  ///
+  /// Implementation will differ depending on the browser.
+  ScreenshotManager? _screenshotManager;
 
   /// Whether [close] has been called.
   bool get _closed => _closeMemo.hasRun;
@@ -104,46 +100,147 @@ class BrowserPlatform extends PlatformPlugin {
   /// Whether to update screenshot golden files.
   final bool doUpdateScreenshotGoldens;
 
-  BrowserPlatform._(
-      String name, this._server, Configuration config, String faviconPath,
-      {String root, this.doUpdateScreenshotGoldens})
-      : this.browserName = name,
-        _config = config,
-        _root = root == null ? p.current : root,
-        _http = config.pubServeUrl == null ? null : HttpClient() {
-    var cascade = shelf.Cascade().add(_webSocketHandler.handler);
+  late final shelf.Handler _packageUrlHandler = packagesDirHandler();
 
-    if (_config.pubServeUrl == null) {
-      // We server static files from here (JS, HTML, etc)
-      final String staticFilePath =
-          config.suiteDefaults.precompiledPath ?? _root;
-      cascade = cascade
-          .add(packagesDirHandler())
-          .add(_jsHandler.handler)
-          .add(createStaticHandler(staticFilePath,
-              // Precompiled directories often contain symlinks
-              serveFilesOutsidePath:
-                  config.suiteDefaults.precompiledPath != null))
-          .add(_wrapperHandler);
-      // Screenshot tests are only enabled in chrome for now.
-      if (name == 'chrome') {
-        cascade = cascade.add(_screeshotHandler);
-      }
+  final PackageConfig packageConfig;
+
+  BrowserPlatform._({
+    required this.browserName,
+    required this.server,
+    required this.isDebug,
+    required String faviconPath,
+    required this.doUpdateScreenshotGoldens,
+    required this.packageConfig,
+  }) {
+    // The cascade of request handlers.
+    shelf.Cascade cascade = shelf.Cascade()
+        // The web socket that carries the test channels for running tests and
+        // reporting restuls. See [_browserManagerFor] and [BrowserManager.start]
+        // for details on how the channels are established.
+        .add(_webSocketHandler.handler)
+
+        // Serves /favicon.ico
+        .add(createFileHandler(faviconPath))
+
+        // Serves /packages/* requests; fetches files and sources from
+        // pubspec dependencies.
+        //
+        // Includes:
+        //  * Requests for Dart sources from source maps
+        //  * Assets that are part of the engine sources, such as Ahem.ttf
+        .add(_packageUrlHandler)
+
+        // Serves files from the web_ui/build/ directory at the root (/) URL path.
+        //
+        // Includes:
+        //  * Precompiles .js files for tests
+        //  * Sourcemaps
+        .add(createStaticHandler(env.environment.webUiBuildDir.path))
+
+        // Serves the initial HTML for the test.
+        .add(_testBootstrapHandler)
+
+        // Serves files from the root of web_ui.
+        //
+        // This is needed because sourcemaps refer to local files, i.e. those
+        // that don't come from package dependencies, relative to web_ui/.
+        //
+        // Examples of URLs that this handles:
+        //  * /test/alarm_clock_test.dart
+        //  * /lib/src/engine/alarm_clock.dart
+        .add(createStaticHandler(env.environment.webUiRootDir.path))
+
+        // Serves absolute package URLs (i.e. not /packages/* but /Users/user/*/hosted/pub.dartlang.org/*).
+        // This handler goes last, after all more specific handlers failed to handle the request.
+        .add(_createAbsolutePackageUrlHandler());
+
+    // Screenshot tests are only enabled in Chrome and Safari iOS for now.
+    if (browserName == 'chrome' || browserName == 'ios-safari') {
+      cascade = cascade.add(_screeshotHandler);
+      _screenshotManager = ScreenshotManager.choose(browserName);
     }
 
-    var pipeline = shelf.Pipeline()
-        .addMiddleware(PathHandler.nestedIn(_secret))
-        .addHandler(cascade.handler);
+    server.mount(cascade.handler);
+  }
 
-    _server.mount(shelf.Cascade()
-        .add(createFileHandler(faviconPath))
-        .add(pipeline)
-        .handler);
+  /// Handles URLs pointing to Dart sources using absolute URI paths.
+  ///
+  /// Dart source paths that dart2js puts in source maps for pub packages are
+  /// relative to the source map file. Example:
+  ///
+  ///     ../../../../../../../../../Users/yegor/AppData/Local/Pub/Cache/hosted/pub.dartlang.org/stack_trace-1.10.0/lib/src/frame.dart
+  ///
+  /// When the browser requests the file from the source map it sends a GET
+  /// request like this:
+  ///
+  ///     GET /Users/yegor/AppData/Local/Pub/Cache/hosted/pub.dartlang.org/stack_trace-1.10.0/lib/src/frame.dart
+  ///
+  /// There's no predictable structure in this URL. It's unclear whether this
+  /// is a request for a source file, or someone trying to hack your
+  /// workstation.
+  ///
+  /// This handler treats the URL as an absolute path, but instead of
+  /// unconditionally serving it, it first checks with `package_config.json` on
+  /// whether this is a request for a Dart source that's listed in pubspec
+  /// dependencies. For example, the `stack_trace` package would be listed in
+  /// `package_config.json` as:
+  ///
+  ///     file:///C:/Users/yegor/AppData/Local/Pub/Cache/hosted/pub.dartlang.org/stack_trace-1.10.0
+  ///
+  /// If the requested URL points into one of the packages in the package config,
+  /// the file is served. Otherwise, HTTP 404 is returned without file contents.
+  ///
+  /// To handle drive letters (C:\) and *nix file system roots, the URL and
+  /// package paths are initially stripped of the root and compared to each
+  /// other as prefixes. To actually read the file, the file system root is
+  /// prepended before creating the file.
+  shelf.Handler _createAbsolutePackageUrlHandler() {
+    final Map<String, Package> urlToPackage = <String, Package>{};
+    for (final Package package in packageConfig.packages) {
+      // Turns the URI as encoded in package_config.json to a file path.
+      final String configPath = p.fromUri(package.root);
+
+      // Strips drive letter and root prefix, if any, for example:
+      //
+      // C:\Users\user\AppData => Users\user\AppData
+      // /home/user/path.dart => home/user/path.dart
+      final String rootRelativePath = p.relative(configPath, from: p.rootPrefix(configPath));
+      urlToPackage[p.toUri(rootRelativePath).path] = package;
+    }
+    return (shelf.Request request) async {
+      final String requestedPath = request.url.path;
+      // The cast is needed because keys are non-null String, so there's no way
+      // to return null for a mismatch.
+      final String? packagePath = urlToPackage.keys.cast<String?>().firstWhere(
+        (String? packageUrl) => requestedPath.startsWith(packageUrl!),
+        orElse: () => null,
+      );
+      if (packagePath == null) {
+        return shelf.Response.notFound('Not a pub.dartlang.org request');
+      }
+
+      // Attach the root prefix, such as drive letter, and convert from URI to path.
+      // Examples:
+      //
+      // Users\user\AppData => C:\Users\user\AppData
+      // home/user/path.dart => /home/user/path.dart
+      final Package package = urlToPackage[packagePath]!;
+      final String filePath = p.join(
+        p.rootPrefix(p.fromUri(package.root.path)),
+        p.fromUri(requestedPath),
+      );
+      final File fileInPackage = File(filePath);
+      if (!fileInPackage.existsSync()) {
+        return shelf.Response.notFound('File not found: $requestedPath');
+      }
+      return shelf.Response.ok(fileInPackage.openRead());
+    };
   }
 
   Future<shelf.Response> _screeshotHandler(shelf.Request request) async {
-    if (browserName != 'chrome') {
-      throw Exception('Screenshots tests are only available in Chrome.');
+    if (browserName != 'chrome' && browserName != 'ios-safari') {
+      throw Exception('Screenshots tests are only available in Chrome '
+          'and in Safari-iOS.');
     }
 
     if (!request.requestedUri.path.endsWith('/screenshot')) {
@@ -179,6 +276,9 @@ class BrowserPlatform extends PlatformPlugin {
       write = true;
     }
 
+    filename =
+        filename.replaceAll('.png', '${_screenshotManager!.filenameSuffix}.png');
+
     String goldensDirectory;
     if (filename.startsWith('__local__')) {
       filename = filename.substring('__local__/'.length);
@@ -188,7 +288,6 @@ class BrowserPlatform extends PlatformPlugin {
         'golden_files',
       );
     } else {
-      await fetchGoldens();
       goldensDirectory = p.join(
         env.environment.webUiGoldensRepositoryDirectory.path,
         'engine',
@@ -196,185 +295,36 @@ class BrowserPlatform extends PlatformPlugin {
       );
     }
 
-    // Bail out fast if golden doesn't exist, and user doesn't want to create it.
-    final File file = File(p.join(
-      goldensDirectory,
-      filename,
-    ));
-    if (!file.existsSync() && !write) {
-      return '''
-Golden file $filename does not exist.
-
-To automatically create this file call matchGoldenFile('$filename', write: true).
-''';
-    }
-
-    final wip.ChromeConnection chromeConnection =
-        wip.ChromeConnection('localhost', kDevtoolsPort);
-    final wip.ChromeTab chromeTab = await chromeConnection.getTab(
-        (wip.ChromeTab chromeTab) => chromeTab.url.contains('localhost'));
-    final wip.WipConnection wipConnection = await chromeTab.connect();
-
-    Map<String, dynamic> captureScreenshotParameters = null;
-    if (region != null) {
-      captureScreenshotParameters = <String, dynamic>{
-        'format': 'png',
-        'clip': <String, dynamic>{
-          'x': region['x'],
-          'y': region['y'],
-          'width': region['width'],
-          'height': region['height'],
-          'scale':
-              1, // This is NOT the DPI of the page, instead it's the "zoom level".
-        },
-      };
-    }
-
-    // Setting hardware-independent screen parameters:
-    // https://chromedevtools.github.io/devtools-protocol/tot/Emulation
-    await wipConnection
-        .sendCommand('Emulation.setDeviceMetricsOverride', <String, dynamic>{
-      'width': kMaxScreenshotWidth,
-      'height': kMaxScreenshotHeight,
-      'deviceScaleFactor': 1,
-      'mobile': false,
-    });
-    final wip.WipResponse response = await wipConnection.sendCommand(
-        'Page.captureScreenshot', captureScreenshotParameters);
-
-    // Compare screenshots
-    final Image screenshot =
-        decodePng(base64.decode(response.result['data'] as String));
-
-    if (write) {
-      // Don't even bother with the comparison, just write and return
-      print('Updating screenshot golden: $file');
-      file.writeAsBytesSync(encodePng(screenshot), flush: true);
-      if (doUpdateScreenshotGoldens) {
-        // Do not fail tests when bulk-updating screenshot goldens.
-        return 'OK';
-      } else {
-        return 'Golden file $filename was updated. You can remove "write: true" in the call to matchGoldenFile.';
-      }
-    }
-
-    ImageDiff diff = ImageDiff(
-      golden: decodeNamedImage(file.readAsBytesSync(), filename),
-      other: screenshot,
-      pixelComparison: pixelComparison,
+    final Rectangle regionAsRectange = Rectangle(
+      region['x'] as num,
+      region['y'] as num,
+      region['width'] as num,
+      region['height'] as num,
     );
 
-    if (diff.rate > 0) {
-      // Images are different, so produce some debug info
-      final String testResultsPath = isCirrus
-          ? p.join(
-              Platform.environment['CIRRUS_WORKING_DIR'],
-              'test_results',
-            )
-          : p.join(
-              env.environment.webUiDartToolDir.path,
-              'test_results',
-            );
-      Directory(testResultsPath).createSync(recursive: true);
-      final String basename = p.basenameWithoutExtension(file.path);
+    // Take screenshot.
+    final Image screenshot = await _screenshotManager!.capture(regionAsRectange);
 
-      final File actualFile =
-          File(p.join(testResultsPath, '$basename.actual.png'));
-      actualFile.writeAsBytesSync(encodePng(screenshot), flush: true);
-
-      final File diffFile = File(p.join(testResultsPath, '$basename.diff.png'));
-      diffFile.writeAsBytesSync(encodePng(diff.diff), flush: true);
-
-      final File expectedFile =
-          File(p.join(testResultsPath, '$basename.expected.png'));
-      file.copySync(expectedFile.path);
-
-      final File reportFile =
-          File(p.join(testResultsPath, '$basename.report.html'));
-      reportFile.writeAsStringSync('''
-Golden file $filename did not match the image generated by the test.
-
-<table>
-  <tr>
-    <th>Expected</th>
-    <th>Diff</th>
-    <th>Actual</th>
-  </tr>
-  <tr>
-    <td>
-      <img src="$basename.expected.png">
-    </td>
-    <td>
-      <img src="$basename.diff.png">
-    </td>
-    <td>
-      <img src="$basename.actual.png">
-    </td>
-  </tr>
-</table>
-''');
-
-      final StringBuffer message = StringBuffer();
-      message.writeln(
-          'Golden file $filename did not match the image generated by the test.');
-      message.writeln(getPrintableDiffFilesInfo(diff.rate, maxDiffRateFailure));
-      message
-          .writeln('You can view the test report in your browser by opening:');
-
-      // Cirrus cannot serve HTML pages generated by build jobs, so we
-      // archive all the files so that they can be downloaded and inspected
-      // locally.
-      if (isCirrus) {
-        final String taskId = Platform.environment['CIRRUS_TASK_ID'];
-        final String baseArtifactsUrl =
-            'https://api.cirrus-ci.com/v1/artifact/task/$taskId/web_engine_test/test_results';
-        final String cirrusReportUrl = '$baseArtifactsUrl/$basename.report.zip';
-        message.writeln(cirrusReportUrl);
-
-        await Process.run(
-          'zip',
-          <String>[
-            '$basename.report.zip',
-            '$basename.report.html',
-            '$basename.expected.png',
-            '$basename.diff.png',
-            '$basename.actual.png',
-          ],
-          workingDirectory: testResultsPath,
-        );
-      } else {
-        final String localReportPath = '$testResultsPath/$basename.report.html';
-        message.writeln(localReportPath);
-      }
-
-      message.writeln(
-          'To update the golden file call matchGoldenFile(\'$filename\', write: true).');
-      message.writeln('Golden file: ${expectedFile.path}');
-      message.writeln('Actual file: ${actualFile.path}');
-
-      if (diff.rate < maxDiffRateFailure) {
-        // Issue a warning but do not fail the test.
-        print('WARNING:');
-        print(message);
-        return 'OK';
-      } else {
-        // Fail test
-        return '$message';
-      }
-    }
-    return 'OK';
+    return compareImage(
+        screenshot,
+        doUpdateScreenshotGoldens,
+        filename,
+        pixelComparison,
+        maxDiffRateFailure,
+        goldensDirectory: goldensDirectory,
+        write: write);
   }
 
-  /// A handler that serves wrapper files used to bootstrap tests.
-  shelf.Response _wrapperHandler(shelf.Request request) {
-    var path = p.fromUri(request.url);
+  /// Serves the HTML file that bootstraps the test.
+  shelf.Response _testBootstrapHandler(shelf.Request request) {
+    final String path = p.fromUri(request.url);
 
     if (path.endsWith('.html')) {
-      var test = p.withoutExtension(path) + '.dart';
+      final String test = p.withoutExtension(path) + '.dart';
 
       // Link to the Dart wrapper.
-      var scriptBase = htmlEscape.convert(p.basename(test));
-      var link = '<link rel="x-dart-test" href="$scriptBase">';
+      final String scriptBase = htmlEscape.convert(p.basename(test));
+      final String link = '<link rel="x-dart-test" href="$scriptBase">';
 
       return shelf.Response.ok('''
         <!DOCTYPE html>
@@ -391,78 +341,76 @@ Golden file $filename did not match the image generated by the test.
     return shelf.Response.notFound('Not found.');
   }
 
+  void _checkNotClosed() {
+    if (_closed) {
+      throw StateError('Cannot load test suite. Test platform is closed.');
+    }
+  }
+
   /// Loads the test suite at [path] on the platform [platform].
   ///
   /// This will start a browser to load the suite if one isn't already running.
   /// Throws an [ArgumentError] if `platform.platform` isn't a browser.
+  @override
   Future<RunnerSuite> load(String path, SuitePlatform platform,
       SuiteConfiguration suiteConfig, Object message) async {
+    _checkNotClosed();
     if (suiteConfig.precompiledPath == null) {
       throw Exception('This test platform only supports precompiled JS.');
     }
-    var browser = platform.runtime;
+    final Runtime browser = platform.runtime;
     assert(suiteConfig.runtimes.contains(browser.identifier));
 
     if (!browser.isBrowser) {
       throw ArgumentError('$browser is not a browser.');
     }
+    _checkNotClosed();
 
-    var htmlPath = p.withoutExtension(path) + '.html';
-    if (File(htmlPath).existsSync() &&
-        !File(htmlPath).readAsStringSync().contains('packages/test/dart.js')) {
-      throw LoadException(
-          path,
-          '"${htmlPath}" must contain <script src="packages/test/dart.js">'
-          '</script>.');
-    }
+    final Uri suiteUrl = url.resolveUri(
+        p.toUri(p.withoutExtension(p.relative(path, from: env.environment.webUiBuildDir.path)) + '.html'));
+    _checkNotClosed();
 
-    if (_closed) {
-      return null;
+    final BrowserManager? browserManager = await _browserManagerFor(browser);
+    if (browserManager == null) {
+      throw StateError('Failed to initialize browser manager for ${browser.name}');
     }
-    Uri suiteUrl = url.resolveUri(
-        p.toUri(p.withoutExtension(p.relative(path, from: _root)) + '.html'));
+    _checkNotClosed();
 
-    if (_closed) {
-      return null;
-    }
-
-    var browserManager = await _browserManagerFor(browser);
-    if (_closed || browserManager == null) {
-      return null;
-    }
-
-    var suite = await browserManager.load(path, suiteUrl, suiteConfig, message);
-    if (_closed) {
-      return null;
-    }
+    final RunnerSuite suite = await browserManager.load(path, suiteUrl, suiteConfig, message);
+    _checkNotClosed();
     return suite;
   }
 
   StreamChannel loadChannel(String path, SuitePlatform platform) =>
       throw UnimplementedError();
 
-  Future<BrowserManager> _browserManager;
+  Future<BrowserManager?>? _browserManager;
 
   /// Returns the [BrowserManager] for [runtime], which should be a browser.
   ///
   /// If no browser manager is running yet, starts one.
-  Future<BrowserManager> _browserManagerFor(Runtime browser) {
+  Future<BrowserManager?> _browserManagerFor(Runtime browser) {
     if (_browserManager != null) {
-      return _browserManager;
+      return _browserManager!;
     }
 
-    var completer = Completer<WebSocketChannel>.sync();
-    var path = _webSocketHandler.create(webSocketHandler(completer.complete));
-    var webSocketUrl = url.replace(scheme: 'ws').resolve(path);
-    var hostUrl = (_config.pubServeUrl == null ? url : _config.pubServeUrl)
+    final Completer<WebSocketChannel> completer = Completer<WebSocketChannel>.sync();
+    final String path = _webSocketHandler.create(webSocketHandler(completer.complete));
+    final Uri webSocketUrl = url.replace(scheme: 'ws').resolve(path);
+    final Uri hostUrl = url
         .resolve('packages/web_engine_tester/static/index.html')
         .replace(queryParameters: <String, dynamic>{
       'managerUrl': webSocketUrl.toString(),
-      'debug': _config.pauseAfterLoad.toString()
+      'debug': isDebug.toString()
     });
 
-    var future = BrowserManager.start(browser, hostUrl, completer.future,
-        debug: _config.pauseAfterLoad);
+    final Future<BrowserManager?> future = BrowserManager.start(
+      runtime: browser,
+      url: hostUrl,
+      future: completer.future,
+      packageConfig: packageConfig,
+      debug: isDebug,
+    );
 
     // Store null values for browsers that error out so we know not to load them
     // again.
@@ -476,9 +424,9 @@ Golden file $filename did not match the image generated by the test.
   /// Note that this doesn't close the server itself. Browser tests can still be
   /// loaded, they'll just spawn new browsers.
   Future<void> closeEphemeral() async {
-    final BrowserManager result = await _browserManager;
-    if (result != null) {
-      await result.close();
+    if (_browserManager != null) {
+      final BrowserManager? result = await _browserManager!;
+      await result?.close();
     }
   }
 
@@ -490,18 +438,14 @@ Golden file $filename did not match the image generated by the test.
     return _closeMemo.runOnce(() async {
       final List<Future<void>> futures = <Future<void>>[];
       futures.add(Future<void>.microtask(() async {
-        final BrowserManager result = await _browserManager;
-        if (result != null) {
-          await result.close();
+        if (_browserManager != null) {
+          final BrowserManager? result = await _browserManager!;
+          await result?.close();
         }
       }));
-      futures.add(_server.close());
+      futures.add(server.close());
 
       await Future.wait(futures);
-
-      if (_config.pubServeUrl != null) {
-        _http.close();
-      }
     });
   }
 
@@ -551,72 +495,13 @@ class OneOffHandler {
   }
 }
 
-/// A handler that routes to sub-handlers based on exact path prefixes.
-class PathHandler {
-  /// A trie of path components to handlers.
-  final _paths = _Node();
-
-  /// The shelf handler.
-  shelf.Handler get handler => _onRequest;
-
-  /// Returns middleware that nests all requests beneath the URL prefix
-  /// [beneath].
-  static shelf.Middleware nestedIn(String beneath) {
-    return (handler) {
-      var pathHandler = PathHandler()..add(beneath, handler);
-      return pathHandler.handler;
-    };
-  }
-
-  /// Routes requests at or under [path] to [handler].
-  ///
-  /// If [path] is a parent or child directory of another path in this handler,
-  /// the longest matching prefix wins.
-  void add(String path, shelf.Handler handler) {
-    var node = _paths;
-    for (var component in p.url.split(path)) {
-      node = node.children.putIfAbsent(component, () => _Node());
-    }
-    node.handler = handler;
-  }
-
-  FutureOr<shelf.Response> _onRequest(shelf.Request request) {
-    shelf.Handler handler;
-    int handlerIndex;
-    var node = _paths;
-    var components = p.url.split(request.url.path);
-    for (var i = 0; i < components.length; i++) {
-      node = node.children[components[i]];
-      if (node == null) {
-        break;
-      }
-      if (node.handler == null) {
-        continue;
-      }
-      handler = node.handler;
-      handlerIndex = i;
-    }
-
-    if (handler == null) {
-      return shelf.Response.notFound('Not found.');
-    }
-
-    return handler(
-        request.change(path: p.url.joinAll(components.take(handlerIndex + 1))));
-  }
-}
-
-/// A trie node.
-class _Node {
-  shelf.Handler handler;
-  final children = Map<String, _Node>();
-}
-
 /// A class that manages the connection to a single running browser.
 ///
 /// This is in charge of telling the browser which test suites to load and
 /// converting its responses into [Suite] objects.
 class BrowserManager {
+  final PackageConfig packageConfig;
+
   /// The browser instance that this is connected to via [_channel].
   final Browser _browser;
 
@@ -626,7 +511,7 @@ class BrowserManager {
   /// The channel used to communicate with the browser.
   ///
   /// This is connected to a page running `static/host.dart`.
-  MultiChannel _channel;
+  late final MultiChannel _channel;
 
   /// A pool that ensures that limits the number of initial connections the
   /// manager will wait for at once.
@@ -650,13 +535,13 @@ class BrowserManager {
   ///
   /// This will be `null` as long as the browser isn't displaying a pause
   /// screen.
-  CancelableCompleter _pauseCompleter;
+  CancelableCompleter? _pauseCompleter;
 
   /// The controller for [_BrowserEnvironment.onRestart].
   final _onRestartController = StreamController<dynamic>.broadcast();
 
   /// The environment to attach to each suite.
-  Future<_BrowserEnvironment> _environment;
+  late final Future<_BrowserEnvironment> _environment;
 
   /// Controllers for every suite in this browser.
   ///
@@ -668,7 +553,7 @@ class BrowserManager {
   //
   // Because the browser stops running code when the user is actively debugging,
   // this lets us detect whether they're debugging reasonably accurately.
-  RestartableTimer _timer;
+  late final RestartableTimer _timer;
 
   /// Starts the browser identified by [runtime] and has it connect to [url].
   ///
@@ -681,19 +566,23 @@ class BrowserManager {
   ///
   /// Returns the browser manager, or throws an [Exception] if a
   /// connection fails to be established.
-  static Future<BrowserManager> start(
-      Runtime runtime, Uri url, Future<WebSocketChannel> future,
-      {bool debug = false}) {
+  static Future<BrowserManager?> start({
+    required Runtime runtime,
+    required Uri url,
+    required Future<WebSocketChannel> future,
+    required PackageConfig packageConfig,
+    bool debug = false,
+  }) {
     var browser = _newBrowser(url, runtime, debug: debug);
 
     var completer = Completer<BrowserManager>();
 
     // For the cases where we use a delegator such as `adb` (for Android) or
     // `xcrun` (for IOS), these delegator processes can shut down before the
-    // websocket is available. Therefore do not throw an error if proccess
+    // websocket is available. Therefore do not throw an error if process
     // exits with exitCode 0. Note that `browser` will throw and error if the
     // exit code was not 0, which will be processed by the next callback.
-    browser.onExit.catchError((dynamic error, StackTrace stackTrace) {
+    browser.onExit.catchError((Object error, StackTrace stackTrace) {
       if (completer.isCompleted) {
         return;
       }
@@ -704,11 +593,11 @@ class BrowserManager {
       if (completer.isCompleted) {
         return;
       }
-      completer.complete(BrowserManager._(browser, runtime, webSocket));
-    }).catchError((dynamic error, StackTrace stackTrace) {
+      completer.complete(BrowserManager._(packageConfig, browser, runtime, webSocket));
+    }).catchError((Object error, StackTrace stackTrace) {
       browser.close();
       if (completer.isCompleted) {
-        return;
+        return null;
       }
       completer.completeError(error, stackTrace);
     });
@@ -725,7 +614,7 @@ class BrowserManager {
 
   /// Creates a new BrowserManager that communicates with [browser] over
   /// [webSocket].
-  BrowserManager._(this._browser, this._runtime, WebSocketChannel webSocket) {
+  BrowserManager._(this.packageConfig, this._browser, this._runtime, WebSocketChannel webSocket) {
     // The duration should be short enough that the debugging console is open as
     // soon as the user is done setting breakpoints, but long enough that a test
     // doing a lot of synchronous work doesn't trigger a false positive.
@@ -780,7 +669,7 @@ class BrowserManager {
     })));
 
     var suiteID = _suiteID++;
-    RunnerSuiteController controller;
+    RunnerSuiteController? controller;
     void closeIframe() {
       if (_closed) {
         return;
@@ -811,15 +700,16 @@ class BrowserManager {
         controller = deserializeSuite(path, currentPlatform(_runtime),
             suiteConfig, await _environment, suiteChannel, message);
 
-        final String mapPath = p.join(
-          env.environment.webUiRootDir.path,
-          'build',
-          '$path.browser_test.dart.js.map',
-        );
-        PackageConfig packageConfig = await loadPackageConfigUri(
-          await Isolate.packageConfig);
-        Map<String, Uri> packageMap =
-          {for (var p in packageConfig.packages) p.name: p.packageUriRoot};
+        final String sourceMapFileName =
+            '${p.basename(path)}.browser_test.dart.js.map';
+        final String pathToTest = p.dirname(path);
+
+        final String mapPath = p.join(env.environment.webUiRootDir.path,
+            'build', pathToTest, sourceMapFileName);
+
+        Map<String, Uri> packageMap = {
+          for (var p in packageConfig.packages) p.name: p.packageUriRoot
+        };
         final JSStackTraceMapper mapper = JSStackTraceMapper(
           await File(mapPath).readAsString(),
           mapUrl: p.toUri(mapPath),
@@ -827,10 +717,10 @@ class BrowserManager {
           sdkRoot: p.toUri(sdkDir),
         );
 
-        controller.channel('test.browser.mapper').sink.add(mapper.serialize());
+        controller!.channel('test.browser.mapper').sink.add(mapper.serialize());
 
-        _controllers.add(controller);
-        return await controller.suite;
+        _controllers.add(controller!);
+        return await controller!.suite;
       } catch (_) {
         closeIframe();
         rethrow;
@@ -840,22 +730,24 @@ class BrowserManager {
 
   /// An implementation of [Environment.displayPause].
   CancelableOperation _displayPause() {
-    if (_pauseCompleter != null) {
-      return _pauseCompleter.operation;
+    CancelableCompleter? pauseCompleter = _pauseCompleter;
+    if (pauseCompleter != null) {
+      return pauseCompleter.operation;
     }
 
-    _pauseCompleter = CancelableCompleter<void>(onCancel: () {
+    pauseCompleter = CancelableCompleter<void>(onCancel: () {
       _channel.sink.add({'command': 'resume'});
       _pauseCompleter = null;
     });
+    _pauseCompleter = pauseCompleter;
 
-    _pauseCompleter.operation.value.whenComplete(() {
+    pauseCompleter.operation.value.whenComplete(() {
       _pauseCompleter = null;
     });
 
     _channel.sink.add({'command': 'displayPause'});
 
-    return _pauseCompleter.operation;
+    return pauseCompleter.operation;
   }
 
   /// The callback for handling messages received from the host page.
@@ -869,9 +761,7 @@ class BrowserManager {
         break;
 
       case 'resume':
-        if (_pauseCompleter != null) {
-          _pauseCompleter.complete();
-        }
+        _pauseCompleter?.complete();
         break;
 
       default:
@@ -886,9 +776,7 @@ class BrowserManager {
   Future close() => _closeMemoizer.runOnce(() {
         _closed = true;
         _timer.cancel();
-        if (_pauseCompleter != null) {
-          _pauseCompleter.complete();
-        }
+        _pauseCompleter?.complete();
         _pauseCompleter = null;
         _controllers.clear();
         return _browser.close();
@@ -904,9 +792,9 @@ class _BrowserEnvironment implements Environment {
 
   final supportsDebugging = true;
 
-  final Uri observatoryUrl;
+  final Uri? observatoryUrl;
 
-  final Uri remoteDebuggerUrl;
+  final Uri? remoteDebuggerUrl;
 
   final Stream onRestart;
 

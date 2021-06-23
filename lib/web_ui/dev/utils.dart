@@ -2,16 +2,26 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// @dart = 2.6
 import 'dart:async';
 import 'dart:io' as io;
 
+import 'package:args/args.dart';
 import 'package:args/command_runner.dart';
 import 'package:meta/meta.dart';
 import 'package:path/path.dart' as path;
 
 import 'environment.dart';
 import 'exceptions.dart';
+
+/// Clears the terminal screen and places the cursor at the top left corner.
+///
+/// This works on Linux and Mac. On Windows, it's a no-op.
+void clearTerminalScreen() {
+  if (!io.Platform.isWindows) {
+    // See: https://en.wikipedia.org/wiki/ANSI_escape_code#CSI_sequences
+    print("\x1B[2J\x1B[1;2H");
+  }
+}
 
 class FilePath {
   FilePath.fromCwd(String relativePath)
@@ -28,8 +38,7 @@ class FilePath {
 
   @override
   bool operator ==(Object other) {
-    return other is FilePath
-        && other._absolutePath == _absolutePath;
+    return other is FilePath && other._absolutePath == _absolutePath;
   }
 
   @override
@@ -40,7 +49,7 @@ class FilePath {
 Future<int> runProcess(
   String executable,
   List<String> arguments, {
-  String workingDirectory,
+  String? workingDirectory,
   bool mustSucceed: false,
   Map<String, String> environment = const <String, String>{},
 }) async {
@@ -71,7 +80,7 @@ Future<int> runProcess(
 Future<void> startProcess(
   String executable,
   List<String> arguments, {
-  String workingDirectory,
+  String? workingDirectory,
   bool mustSucceed: false,
 }) async {
   final io.Process process = await io.Process.start(
@@ -92,7 +101,7 @@ Future<void> startProcess(
 Future<String> evalProcess(
   String executable,
   List<String> arguments, {
-  String workingDirectory,
+  String? workingDirectory,
 }) async {
   final io.ProcessResult result = await io.Process.run(
     executable,
@@ -134,17 +143,17 @@ Future<void> runFlutter(
 @immutable
 class ProcessException implements Exception {
   ProcessException({
-    @required this.description,
-    @required this.executable,
-    @required this.arguments,
-    @required this.workingDirectory,
-    @required this.exitCode,
+    required this.description,
+    required this.executable,
+    required this.arguments,
+    required this.workingDirectory,
+    required this.exitCode,
   });
 
   final String description;
   final String executable;
   final List<String> arguments;
-  final String workingDirectory;
+  final String? workingDirectory;
   final int exitCode;
 
   @override
@@ -163,20 +172,20 @@ class ProcessException implements Exception {
 /// Adds utility methods
 mixin ArgUtils<T> on Command<T> {
   /// Extracts a boolean argument from [argResults].
-  bool boolArg(String name) => argResults[name] as bool;
+  bool? boolArg(String name) => argResults?[name] as bool?;
 
   /// Extracts a string argument from [argResults].
-  String stringArg(String name) => argResults[name] as String;
+  String? stringArg(String name) => argResults?[name] as String?;
 
   /// Extracts a integer argument from [argResults].
   ///
   /// If the argument value cannot be parsed as [int] throws an [ArgumentError].
-  int intArg(String name) {
-    final String rawValue = stringArg(name);
+  int? intArg(String name) {
+    final String? rawValue = stringArg(name);
     if (rawValue == null) {
       return null;
     }
-    final int value = int.tryParse(rawValue);
+    final int? value = int.tryParse(rawValue);
     if (value == null) {
       throw ArgumentError(
         'Argument $name should be an integer value but was "$rawValue"',
@@ -186,16 +195,47 @@ mixin ArgUtils<T> on Command<T> {
   }
 }
 
+/// Parses additional options that can be used for all tests.
+class GeneralTestsArgumentParser {
+  static final GeneralTestsArgumentParser _singletonInstance =
+      GeneralTestsArgumentParser._();
+
+  /// The [GeneralTestsArgumentParser] singleton.
+  static GeneralTestsArgumentParser get instance => _singletonInstance;
+
+  GeneralTestsArgumentParser._();
+
+  /// If target name is provided integration tests can run that one test
+  /// instead of running all the tests.
+  bool verbose = false;
+
+  void populateOptions(ArgParser argParser) {
+    argParser
+      ..addFlag(
+        'verbose',
+        defaultsTo: false,
+        help: 'Flag to indicate extra logs should also be printed.',
+      );
+  }
+
+  /// Populate results of the arguments passed.
+  void parseOptions(ArgResults argResults) {
+    verbose = argResults['verbose'] as bool;
+  }
+}
+
+bool get isVerboseLoggingEnabled => GeneralTestsArgumentParser.instance.verbose;
+
 /// There might be proccesses started during the tests.
 ///
 /// Use this list to store those Processes, for cleaning up before shutdown.
-final List<io.Process> processesToCleanUp = List<io.Process>();
+final List<io.Process> processesToCleanUp = <io.Process>[];
 
 /// There might be temporary directories created during the tests.
 ///
 /// Use this list to store those directories and for deleteing them before
 /// shutdown.
-final List<io.Directory> temporaryDirectories = List<io.Directory>();
+final List<io.Directory> temporaryDirectories = <io.Directory>[];
 
 typedef AsyncCallback = Future<void> Function();
 
@@ -203,10 +243,10 @@ typedef AsyncCallback = Future<void> Function();
 ///
 /// Add these operations here to make sure that they will run before felt
 /// exit.
-final List<AsyncCallback> cleanupCallbacks = List<AsyncCallback>();
+final List<AsyncCallback> cleanupCallbacks = <AsyncCallback>[];
 
 /// Cleanup the remaning processes, close open browsers, delete temp files.
-void cleanup() async {
+Future<void> cleanup() async {
   // Cleanup remaining processes if any.
   if (processesToCleanUp.length > 0) {
     for (io.Process process in processesToCleanUp) {
@@ -216,7 +256,9 @@ void cleanup() async {
   // Delete temporary directories.
   if (temporaryDirectories.length > 0) {
     for (io.Directory directory in temporaryDirectories) {
-      directory.deleteSync(recursive: true);
+      if (!directory.existsSync()) {
+        directory.deleteSync(recursive: true);
+      }
     }
   }
 

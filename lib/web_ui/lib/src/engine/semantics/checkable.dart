@@ -11,7 +11,6 @@
 //                framework. Currently the framework does not report the
 //                grouping of radio buttons.
 
-
 part of engine;
 
 /// The specific type of checkable control.
@@ -28,7 +27,8 @@ enum _CheckableKind {
   toggle,
 }
 
-_CheckableKind _checkableKindFromSemanticsFlag(SemanticsObject semanticsObject) {
+_CheckableKind _checkableKindFromSemanticsFlag(
+    SemanticsObject semanticsObject) {
   if (semanticsObject.hasFlag(ui.SemanticsFlag.isInMutuallyExclusiveGroup)) {
     return _CheckableKind.radio;
   } else if (semanticsObject.hasFlag(ui.SemanticsFlag.hasToggledState)) {
@@ -99,7 +99,7 @@ class Checkable extends RoleManager {
   }
 
   void _updateDisabledAttribute() {
-    if (!semanticsObject.hasFlag(ui.SemanticsFlag.isEnabled)) {
+    if (semanticsObject.enabledState() == EnabledState.disabled) {
       final html.Element element = semanticsObject.element;
       element
         ..setAttribute('aria-disabled', 'true')

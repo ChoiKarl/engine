@@ -1,24 +1,33 @@
 package io.flutter.embedding.engine.mutatorsstack;
 
+import static android.view.View.OnFocusChangeListener;
+
 import android.annotation.SuppressLint;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Matrix;
 import android.graphics.Path;
 import android.view.MotionEvent;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.ViewTreeObserver;
 import android.widget.FrameLayout;
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.annotation.VisibleForTesting;
 import io.flutter.embedding.android.AndroidTouchProcessor;
 
 /**
- * A view that applies the {@link io.flutter.embedding.engine.mutatorsstack.MutatorsStack} to its
- * children.
+ * A view that applies the {@link io.flutter.embedding.engine.mutatorsstack.FlutterMutatorsStack} to
+ * its children.
  */
 public class FlutterMutatorView extends FrameLayout {
   private FlutterMutatorsStack mutatorsStack;
   private float screenDensity;
   private int left;
   private int top;
+  private int prevLeft;
+  private int prevTop;
 
   private final AndroidTouchProcessor androidTouchProcessor;
 
@@ -29,7 +38,7 @@ public class FlutterMutatorView extends FrameLayout {
   public FlutterMutatorView(
       @NonNull Context context,
       float screenDensity,
-      @NonNull AndroidTouchProcessor androidTouchProcessor) {
+      @Nullable AndroidTouchProcessor androidTouchProcessor) {
     super(context, null);
     this.screenDensity = screenDensity;
     this.androidTouchProcessor = androidTouchProcessor;
@@ -37,9 +46,52 @@ public class FlutterMutatorView extends FrameLayout {
 
   /** Initialize the FlutterMutatorView. */
   public FlutterMutatorView(@NonNull Context context) {
-    super(context, null);
-    this.screenDensity = 1;
-    this.androidTouchProcessor = null;
+    this(context, 1, /* androidTouchProcessor=*/ null);
+  }
+
+  /**
+   * Determines if the current view or any descendant view has focus.
+   *
+   * @param root The root view.
+   * @return True if the current view or any descendant view has focus.
+   */
+  @VisibleForTesting
+  public static boolean childHasFocus(@Nullable View root) {
+    if (root == null) {
+      return false;
+    }
+    if (root.hasFocus()) {
+      return true;
+    }
+    if (root instanceof ViewGroup) {
+      final ViewGroup viewGroup = (ViewGroup) root;
+      for (int idx = 0; idx < viewGroup.getChildCount(); idx++) {
+        if (childHasFocus(viewGroup.getChildAt(idx))) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Adds a focus change listener that notifies when the current view or any of its descendant views
+   * have received focus.
+   *
+   * @param focusListener The focus listener.
+   */
+  public void addOnFocusChangeListener(@NonNull OnFocusChangeListener focusListener) {
+    final View mutatorView = this;
+    final ViewTreeObserver observer = this.getViewTreeObserver();
+    if (observer.isAlive()) {
+      observer.addOnGlobalFocusChangeListener(
+          new ViewTreeObserver.OnGlobalFocusChangeListener() {
+            @Override
+            public void onGlobalFocusChanged(View oldFocus, View newFocus) {
+              focusListener.onFocusChange(mutatorView, childHasFocus(mutatorView));
+            }
+          });
+    }
   }
 
   /**
@@ -122,11 +174,26 @@ public class FlutterMutatorView extends FrameLayout {
       return super.onTouchEvent(event);
     }
 
-    // Mutator view itself doesn't rotate, scale, skew, etc.
-    // we only need to account for translation.
-    Matrix screenMatrix = new Matrix();
-    screenMatrix.postTranslate(left, top);
+    final Matrix screenMatrix = new Matrix();
 
+    switch (event.getAction()) {
+      case MotionEvent.ACTION_DOWN:
+        prevLeft = left;
+        prevTop = top;
+        screenMatrix.postTranslate(left, top);
+        break;
+      case MotionEvent.ACTION_MOVE:
+        // While the view is dragged, use the left and top positions as
+        // they were at the moment the touch event fired.
+        screenMatrix.postTranslate(prevLeft, prevTop);
+        prevLeft = left;
+        prevTop = top;
+        break;
+      case MotionEvent.ACTION_UP:
+      default:
+        screenMatrix.postTranslate(left, top);
+        break;
+    }
     return androidTouchProcessor.onTouchEvent(event, screenMatrix);
   }
 }

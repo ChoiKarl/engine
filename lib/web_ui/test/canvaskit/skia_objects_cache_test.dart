@@ -2,17 +2,21 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// @dart = 2.6
-
-import 'package:mockito/mockito.dart';
+import 'package:test/bootstrap/browser.dart';
 import 'package:test/test.dart';
 
-import 'package:ui/ui.dart' as ui;
 import 'package:ui/src/engine.dart';
+import 'package:ui/ui.dart';
 
+import '../matchers.dart';
+import '../spy.dart';
 import 'common.dart';
 
 void main() {
+  internalBootstrapBrowserTest(() => testMain);
+}
+
+void testMain() {
   group('skia_objects_cache', () {
     _tests();
     // TODO: https://github.com/flutter/flutter/issues/60040
@@ -22,19 +26,18 @@ void main() {
 void _tests() {
   SkiaObjects.maximumCacheSize = 4;
 
-  setUpAll(() async {
-    await ui.webOnlyInitializePlatform();
+  setUpCanvasKitTest();
+
+  setUp(() async {
+    // Pretend the browser does not support FinalizationRegistry so we can test the
+    // resurrection logic.
+    browserSupportsFinalizationRegistry = false;
   });
 
-  group(ResurrectableSkiaObject, () {
+  group(ManagedSkiaObject, () {
     test('implements create, cache, delete, resurrect, delete lifecycle', () {
-      int addPostFrameCallbackCount = 0;
-
-      MockRasterizer mockRasterizer = MockRasterizer();
-      when(mockRasterizer.addPostFrameCallback(any)).thenAnswer((_) {
-        addPostFrameCallbackCount++;
-      });
-      window.rasterizer = mockRasterizer;
+      FakeRasterizer fakeRasterizer = FakeRasterizer();
+      EnginePlatformDispatcher.instance.rasterizer = fakeRasterizer;
 
       // Trigger first create
       final TestSkiaObject testObject = TestSkiaObject();
@@ -54,7 +57,7 @@ void _tests() {
       // Trigger first delete
       SkiaObjects.postFrameCleanUp();
       expect(SkiaObjects.resurrectableObjects, isEmpty);
-      expect(addPostFrameCallbackCount, 1);
+      expect(fakeRasterizer.addPostFrameCallbackCount, 1);
       expect(testObject.createDefaultCount, 1);
       expect(testObject.resurrectCount, 0);
       expect(testObject.deleteCount, 1);
@@ -64,7 +67,7 @@ void _tests() {
       expect(skiaObject2, isNotNull);
       expect(skiaObject2, isNot(same(skiaObject1)));
       expect(SkiaObjects.resurrectableObjects.single, testObject);
-      expect(addPostFrameCallbackCount, 1);
+      expect(fakeRasterizer.addPostFrameCallbackCount, 1);
       expect(testObject.createDefaultCount, 1);
       expect(testObject.resurrectCount, 1);
       expect(testObject.deleteCount, 1);
@@ -72,7 +75,7 @@ void _tests() {
       // Trigger final delete
       SkiaObjects.postFrameCleanUp();
       expect(SkiaObjects.resurrectableObjects, isEmpty);
-      expect(addPostFrameCallbackCount, 1);
+      expect(fakeRasterizer.addPostFrameCallbackCount, 1);
       expect(testObject.createDefaultCount, 1);
       expect(testObject.resurrectCount, 1);
       expect(testObject.deleteCount, 2);
@@ -108,51 +111,274 @@ void _tests() {
     });
   });
 
-  group(OneShotSkiaObject, () {
-    test('is added to SkiaObjects cache', () {
-      TestOneShotSkiaObject.deleteCount = 0;
-      OneShotSkiaObject object1 = TestOneShotSkiaObject();
-      expect(SkiaObjects.oneShotCache.length, 1);
-      expect(SkiaObjects.oneShotCache.debugContains(object1), isTrue);
+  group(SkiaObjectBox, () {
+    test('Records stack traces and respects refcounts', () async {
+      final ZoneSpy spy = ZoneSpy();
+      spy.run(() {
+        Instrumentation.enabled = true;
+        TestSkDeletable.deleteCount = 0;
+        TestBoxWrapper.resurrectCount = 0;
+        final TestBoxWrapper original = TestBoxWrapper();
 
-      OneShotSkiaObject object2 = TestOneShotSkiaObject();
-      expect(SkiaObjects.oneShotCache.length, 2);
-      expect(SkiaObjects.oneShotCache.debugContains(object2), isTrue);
+        expect(original.box.debugGetStackTraces().length, 1);
+        expect(original.box.refCount, 1);
+        expect(original.box.isDeletedPermanently, isFalse);
 
-      SkiaObjects.postFrameCleanUp();
-      expect(SkiaObjects.oneShotCache.length, 2);
-      expect(SkiaObjects.oneShotCache.debugContains(object1), isTrue);
-      expect(SkiaObjects.oneShotCache.debugContains(object2), isTrue);
+        final TestBoxWrapper clone = original.clone();
+        expect(clone.box, same(original.box));
+        expect(clone.box.debugGetStackTraces().length, 2);
+        expect(clone.box.refCount, 2);
+        expect(original.box.debugGetStackTraces().length, 2);
+        expect(original.box.refCount, 2);
+        expect(original.box.isDeletedPermanently, isFalse);
 
-      // Add 3 more objects to the cache to overflow it.
-      TestOneShotSkiaObject();
-      TestOneShotSkiaObject();
-      TestOneShotSkiaObject();
-      expect(SkiaObjects.oneShotCache.length, 5);
-      expect(SkiaObjects.cachesToResize.length, 1);
+        original.dispose();
 
-      SkiaObjects.postFrameCleanUp();
-      expect(TestOneShotSkiaObject.deleteCount, 2);
-      expect(SkiaObjects.oneShotCache.length, 3);
-      expect(SkiaObjects.oneShotCache.debugContains(object1), isFalse);
-      expect(SkiaObjects.oneShotCache.debugContains(object2), isFalse);
+        testCollector.collectNow();
+        expect(TestSkDeletable.deleteCount, 0);
+
+        spy.fakeAsync.elapse(const Duration(seconds: 2));
+        expect(
+          spy.printLog,
+          [
+            'Engine counters:\n'
+                '  TestSkDeletable created: 1\n'
+          ],
+        );
+
+        expect(clone.box.debugGetStackTraces().length, 1);
+        expect(clone.box.refCount, 1);
+        expect(original.box.debugGetStackTraces().length, 1);
+        expect(original.box.refCount, 1);
+
+        clone.dispose();
+        expect(clone.box.debugGetStackTraces().length, 0);
+        expect(clone.box.refCount, 0);
+        expect(original.box.debugGetStackTraces().length, 0);
+        expect(original.box.refCount, 0);
+        expect(original.box.isDeletedPermanently, isTrue);
+
+        testCollector.collectNow();
+        expect(TestSkDeletable.deleteCount, 1);
+        expect(TestBoxWrapper.resurrectCount, 0);
+
+        expect(() => clone.box.unref(clone), throwsAssertionError);
+        spy.printLog.clear();
+        spy.fakeAsync.elapse(const Duration(seconds: 2));
+        expect(
+          spy.printLog,
+          [
+            'Engine counters:\n'
+                '  TestSkDeletable created: 1\n'
+                '  TestSkDeletable deleted: 1\n'
+          ],
+        );
+        Instrumentation.enabled = false;
+      });
+    });
+
+    test('Can resurrect Skia objects', () async {
+      TestSkDeletable.deleteCount = 0;
+      TestBoxWrapper.resurrectCount = 0;
+      final TestBoxWrapper object = TestBoxWrapper();
+      expect(TestSkDeletable.deleteCount, 0);
+      expect(TestBoxWrapper.resurrectCount, 0);
+
+      // Test 3 cycles of delete/resurrect.
+      for (int i = 0; i < 3; i++) {
+        object.box.delete();
+        object.box.didDelete();
+        expect(TestSkDeletable.deleteCount, i + 1);
+        expect(TestBoxWrapper.resurrectCount, i);
+        expect(object.box.isDeletedTemporarily, isTrue);
+        expect(object.box.isDeletedPermanently, isFalse);
+
+        expect(object.box.skiaObject, isNotNull);
+        expect(TestSkDeletable.deleteCount, i + 1);
+        expect(TestBoxWrapper.resurrectCount, i + 1);
+        expect(object.box.isDeletedTemporarily, isFalse);
+        expect(object.box.isDeletedPermanently, isFalse);
+      }
+
+      object.dispose();
+      expect(object.box.isDeletedPermanently, isTrue);
+    });
+
+    test('Can dispose temporarily deleted object', () async {
+      TestSkDeletable.deleteCount = 0;
+      TestBoxWrapper.resurrectCount = 0;
+      final TestBoxWrapper object = TestBoxWrapper();
+      expect(TestSkDeletable.deleteCount, 0);
+      expect(TestBoxWrapper.resurrectCount, 0);
+
+      object.box.delete();
+      object.box.didDelete();
+      expect(TestSkDeletable.deleteCount, 1);
+      expect(TestBoxWrapper.resurrectCount, 0);
+      expect(object.box.isDeletedTemporarily, isTrue);
+      expect(object.box.isDeletedPermanently, isFalse);
+
+      object.dispose();
+      expect(object.box.isDeletedPermanently, isTrue);
+    });
+  });
+
+  group('$SynchronousSkiaObjectCache', () {
+    test('is initialized empty', () {
+      expect(SynchronousSkiaObjectCache(10), hasLength(0));
+    });
+
+    test('adds objects', () {
+      final SynchronousSkiaObjectCache cache = SynchronousSkiaObjectCache(2);
+      cache.add(TestSelfManagedObject());
+      expect(cache, hasLength(1));
+      cache.add(TestSelfManagedObject());
+      expect(cache, hasLength(2));
+    });
+
+    test('forbids adding the same object twice', () {
+      final SynchronousSkiaObjectCache cache = SynchronousSkiaObjectCache(2);
+      final TestSelfManagedObject object = TestSelfManagedObject();
+      cache.add(object);
+      expect(cache, hasLength(1));
+      expect(() => cache.add(object), throwsAssertionError);
+    });
+
+    void expectObjectInCache(
+      SynchronousSkiaObjectCache cache,
+      TestSelfManagedObject object,
+    ) {
+      expect(cache.debugContains(object), isTrue);
+      expect(object._skiaObject, isNotNull);
+    }
+
+    void expectObjectNotInCache(
+      SynchronousSkiaObjectCache cache,
+      TestSelfManagedObject object,
+    ) {
+      expect(cache.debugContains(object), isFalse);
+      expect(object._skiaObject, isNull);
+    }
+
+    test('respects maximumSize', () {
+      final SynchronousSkiaObjectCache cache = SynchronousSkiaObjectCache(2);
+      final TestSelfManagedObject object1 = TestSelfManagedObject();
+      final TestSelfManagedObject object2 = TestSelfManagedObject();
+      final TestSelfManagedObject object3 = TestSelfManagedObject();
+      final TestSelfManagedObject object4 = TestSelfManagedObject();
+
+      cache.add(object1);
+      expect(cache, hasLength(1));
+      expectObjectInCache(cache, object1);
+
+      cache.add(object2);
+      expect(cache, hasLength(2));
+      expectObjectInCache(cache, object1);
+      expectObjectInCache(cache, object2);
+
+      cache.add(object3);
+      expect(cache, hasLength(2));
+      expectObjectNotInCache(cache, object1);
+      expectObjectInCache(cache, object2);
+      expectObjectInCache(cache, object3);
+
+      cache.add(object4);
+      expect(cache, hasLength(2));
+      expectObjectNotInCache(cache, object1);
+      expectObjectNotInCache(cache, object2);
+      expectObjectInCache(cache, object3);
+      expectObjectInCache(cache, object4);
+    });
+
+    test('uses RLU strategy', () {
+      final SynchronousSkiaObjectCache cache = SynchronousSkiaObjectCache(2);
+      final TestSelfManagedObject object1 = TestSelfManagedObject();
+      final TestSelfManagedObject object2 = TestSelfManagedObject();
+      final TestSelfManagedObject object3 = TestSelfManagedObject();
+      final TestSelfManagedObject object4 = TestSelfManagedObject();
+
+      cache.add(object1);
+      expectObjectInCache(cache, object1);
+      cache.add(object2);
+      expectObjectInCache(cache, object2);
+      cache.add(object3);
+      expectObjectInCache(cache, object3);
+      expectObjectNotInCache(cache, object1);
+
+      cache.markUsed(object2);
+      cache.add(object4);
+      expectObjectInCache(cache, object2);
+      expectObjectNotInCache(cache, object3);
+      expectObjectInCache(cache, object4);
     });
   });
 }
 
-class TestOneShotSkiaObject extends OneShotSkiaObject<SkPaint> {
+/// A simple class that wraps a [SkiaObjectBox].
+///
+/// Can be [clone]d such that the clones share the same ref counted box.
+class TestBoxWrapper implements StackTraceDebugger {
+  static int resurrectCount = 0;
+
+  TestBoxWrapper() {
+    if (assertionsEnabled) {
+      _debugStackTrace = StackTrace.current;
+    }
+    box = SkiaObjectBox<TestBoxWrapper, TestSkDeletable>.resurrectable(
+        this, TestSkDeletable(), () {
+      resurrectCount += 1;
+      return TestSkDeletable();
+    });
+  }
+
+  TestBoxWrapper.cloneOf(this.box) {
+    if (assertionsEnabled) {
+      _debugStackTrace = StackTrace.current;
+    }
+    box.ref(this);
+  }
+
+  @override
+  StackTrace get debugStackTrace => _debugStackTrace;
+  late StackTrace _debugStackTrace;
+
+  late SkiaObjectBox<TestBoxWrapper, TestSkDeletable> box;
+
+  void dispose() {
+    box.unref(this);
+  }
+
+  TestBoxWrapper clone() => TestBoxWrapper.cloneOf(box);
+}
+
+class TestSkDeletable implements SkDeletable {
   static int deleteCount = 0;
 
-  TestOneShotSkiaObject() : super(SkPaint());
+  @override
+  bool isDeleted() => _isDeleted;
+  bool _isDeleted = false;
 
   @override
   void delete() {
-    rawSkiaObject?.delete();
+    expect(_isDeleted, isFalse,
+        reason:
+            'CanvasKit does not allow deleting the same object more than once.');
+    _isDeleted = true;
     deleteCount++;
   }
+
+  @override
+  JsConstructor get constructor => TestJsConstructor('TestSkDeletable');
 }
 
-class TestSkiaObject extends ResurrectableSkiaObject<SkPaint> {
+class TestJsConstructor implements JsConstructor {
+  TestJsConstructor(this.name);
+
+  @override
+  final String name;
+}
+
+class TestSkiaObject extends ManagedSkiaObject<SkPaint> {
   int createDefaultCount = 0;
   int resurrectCount = 0;
   int deleteCount = 0;
@@ -183,4 +409,46 @@ class TestSkiaObject extends ResurrectableSkiaObject<SkPaint> {
   bool get isResurrectionExpensive => isExpensive;
 }
 
-class MockRasterizer extends Mock implements Rasterizer {}
+class FakeRasterizer implements Rasterizer {
+  int addPostFrameCallbackCount = 0;
+
+  @override
+  void addPostFrameCallback(VoidCallback callback) {
+    addPostFrameCallbackCount++;
+  }
+
+  @override
+  CompositorContext get context => throw UnimplementedError();
+
+  @override
+  void draw(LayerTree layerTree) {
+    throw UnimplementedError();
+  }
+
+  @override
+  void setSkiaResourceCacheMaxBytes(int bytes) {
+    throw UnimplementedError();
+  }
+
+  @override
+  void debugRunPostFrameCallbacks() {
+    throw UnimplementedError();
+  }
+}
+
+class TestSelfManagedObject extends SkiaObject<TestSkDeletable> {
+  TestSkDeletable? _skiaObject = TestSkDeletable();
+
+  @override
+  void delete() {
+    _skiaObject!.delete();
+  }
+
+  @override
+  void didDelete() {
+    _skiaObject = null;
+  }
+
+  @override
+  TestSkDeletable get skiaObject => throw UnimplementedError();
+}

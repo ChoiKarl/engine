@@ -11,14 +11,16 @@ import android.annotation.TargetApi;
 import android.content.Context;
 import android.os.Build;
 import android.util.DisplayMetrics;
-import android.util.Log;
 import android.util.SparseArray;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.FrameLayout;
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import androidx.annotation.UiThread;
 import androidx.annotation.VisibleForTesting;
+import io.flutter.Log;
 import io.flutter.embedding.android.AndroidTouchProcessor;
 import io.flutter.embedding.android.FlutterImageView;
 import io.flutter.embedding.android.FlutterView;
@@ -79,9 +81,20 @@ public class PlatformViewsController implements PlatformViewsAccessibilityDelega
   // it is associated with(e.g if a platform view creates other views in the same virtual display.
   private final HashMap<Context, View> contextToPlatformView;
 
-  private final SparseArray<PlatformViewsChannel.PlatformViewCreationRequest> platformViewRequests;
-  private final SparseArray<View> platformViews;
-  private final SparseArray<FlutterMutatorView> mutatorViews;
+  // The views returned by `PlatformView#getView()`.
+  //
+  // This only applies to hybrid composition.
+  private final SparseArray<PlatformView> platformViews;
+
+  // The platform view parents that are appended to `FlutterView`.
+  // If an entry in `platformViews` doesn't have an entry in this array, the platform view isn't
+  // in the view hierarchy.
+  //
+  // This view provides a wrapper that applies scene builder operations to the platform view.
+  // For example, a transform matrix, or setting opacity on the platform view layer.
+  //
+  // This is only applies to hybrid composition.
+  private final SparseArray<FlutterMutatorView> platformViewParent;
 
   // Map of unique IDs to views that render overlay layers.
   private final SparseArray<FlutterImageView> overlayLayerViews;
@@ -107,25 +120,49 @@ public class PlatformViewsController implements PlatformViewsAccessibilityDelega
         @Override
         public void createAndroidViewForPlatformView(
             @NonNull PlatformViewsChannel.PlatformViewCreationRequest request) {
-          // API level 19 is required for android.graphics.ImageReader.
+          // API level 19 is required for `android.graphics.ImageReader`.
           ensureValidAndroidVersion(Build.VERSION_CODES.KITKAT);
-          platformViewRequests.put(request.viewId, request);
+
+          if (!validateDirection(request.direction)) {
+            throw new IllegalStateException(
+                "Trying to create a view with unknown direction value: "
+                    + request.direction
+                    + "(view id: "
+                    + request.viewId
+                    + ")");
+          }
+
+          final PlatformViewFactory factory = registry.getFactory(request.viewType);
+          if (factory == null) {
+            throw new IllegalStateException(
+                "Trying to create a platform view of unregistered type: " + request.viewType);
+          }
+
+          Object createParams = null;
+          if (request.params != null) {
+            createParams = factory.getCreateArgsCodec().decodeMessage(request.params);
+          }
+
+          final PlatformView platformView = factory.create(context, request.viewId, createParams);
+          platformViews.put(request.viewId, platformView);
         }
 
         @Override
         public void disposeAndroidViewForPlatformView(int viewId) {
           // Hybrid view.
-          if (platformViewRequests.get(viewId) != null) {
-            platformViewRequests.remove(viewId);
+          final PlatformView platformView = platformViews.get(viewId);
+          final FlutterMutatorView parentView = platformViewParent.get(viewId);
+          if (platformView != null) {
+            if (parentView != null) {
+              parentView.removeView(platformView.getView());
+            }
+            platformViews.remove(viewId);
+            platformView.dispose();
           }
 
-          final View platformView = platformViews.get(viewId);
-          if (platformView != null) {
-            final FlutterMutatorView mutatorView = mutatorViews.get(viewId);
-            mutatorView.removeView(platformView);
-            ((FlutterView) flutterView).removeView(mutatorView);
-            platformViews.remove(viewId);
-            mutatorViews.remove(viewId);
+          if (parentView != null) {
+            ((ViewGroup) parentView.getParent()).removeView(parentView);
+            platformViewParent.remove(viewId);
           }
         }
 
@@ -267,8 +304,10 @@ public class PlatformViewsController implements PlatformViewsAccessibilityDelega
             vdControllers.get(touch.viewId).dispatchTouchEvent(event);
           } else if (platformViews.get(viewId) != null) {
             final MotionEvent event = toMotionEvent(density, touch, /*usingVirtualDiplays=*/ false);
-            View view = platformViews.get(touch.viewId);
-            view.dispatchTouchEvent(event);
+            View view = platformViews.get(touch.viewId).getView();
+            if (view != null) {
+              view.dispatchTouchEvent(event);
+            }
           } else {
             throw new IllegalStateException("Sending touch to an unknown view with id: " + viewId);
           }
@@ -298,6 +337,11 @@ public class PlatformViewsController implements PlatformViewsAccessibilityDelega
 
         @Override
         public void clearFocus(int viewId) {
+          final PlatformView platformView = platformViews.get(viewId);
+          if (platformView != null) {
+            platformView.getView().clearFocus();
+            return;
+          }
           ensureValidAndroidVersion(Build.VERSION_CODES.KITKAT_WATCH);
           View view = vdControllers.get(viewId).getView();
           view.clearFocus();
@@ -378,9 +422,8 @@ public class PlatformViewsController implements PlatformViewsAccessibilityDelega
     currentFrameUsedOverlayLayerIds = new HashSet<>();
     currentFrameUsedPlatformViewIds = new HashSet<>();
 
-    platformViewRequests = new SparseArray<>();
     platformViews = new SparseArray<>();
-    mutatorViews = new SparseArray<>();
+    platformViewParent = new SparseArray<>();
 
     motionEventTracker = MotionEventTracker.getInstance();
   }
@@ -392,7 +435,7 @@ public class PlatformViewsController implements PlatformViewsAccessibilityDelega
    *     controller. This should be the context of the Activity hosting the Flutter application.
    * @param textureRegistry The texture registry which provides the output textures into which the
    *     embedded views will be rendered.
-   * @param dartExecutor The dart execution context, which is used to setup a system channel.
+   * @param dartExecutor The dart execution context, which is used to set up a system channel.
    */
   public void attach(
       Context context, TextureRegistry textureRegistry, @NonNull DartExecutor dartExecutor) {
@@ -417,7 +460,10 @@ public class PlatformViewsController implements PlatformViewsAccessibilityDelega
    */
   @UiThread
   public void detach() {
-    platformViewsChannel.setPlatformViewsHandler(null);
+    if (platformViewsChannel != null) {
+      platformViewsChannel.setPlatformViewsHandler(null);
+    }
+    destroyOverlaySurfaces();
     platformViewsChannel = null;
     context = null;
     textureRegistry = null;
@@ -445,6 +491,7 @@ public class PlatformViewsController implements PlatformViewsAccessibilityDelega
    * the previously attached {@code View}.
    */
   public void detachFromView() {
+    destroyOverlaySurfaces();
     this.flutterView = null;
 
     // Inform all existing platform views that they are no longer associated with
@@ -489,7 +536,12 @@ public class PlatformViewsController implements PlatformViewsAccessibilityDelega
    * if the view was created in a platform view's VD, delegates the decision to the platform view's
    * {@link View#checkInputConnectionProxy(View)} method. Else returns false.
    */
-  public boolean checkInputConnectionProxy(View view) {
+  public boolean checkInputConnectionProxy(@Nullable View view) {
+    // View can be null on some devices
+    // See: https://github.com/flutter/flutter/issues/36517
+    if (view == null) {
+      return false;
+    }
     if (!contextToPlatformView.containsKey(view.getContext())) {
       return false;
     }
@@ -530,13 +582,18 @@ public class PlatformViewsController implements PlatformViewsAccessibilityDelega
   public View getPlatformViewById(Integer id) {
     // Hybrid composition.
     if (platformViews.get(id) != null) {
-      return platformViews.get(id);
+      return platformViews.get(id).getView();
     }
     VirtualDisplayController controller = vdControllers.get(id);
     if (controller == null) {
       return null;
     }
     return controller.getView();
+  }
+
+  @Override
+  public boolean usesVirtualDisplay(Integer id) {
+    return vdControllers.containsKey(id);
   }
 
   private void lockInputConnection(@NonNull VirtualDisplayController controller) {
@@ -640,6 +697,10 @@ public class PlatformViewsController implements PlatformViewsAccessibilityDelega
       controller.dispose();
     }
     vdControllers.clear();
+
+    while (platformViews.size() > 0) {
+      channelHandler.disposeAndroidViewForPlatformView(platformViews.keyAt(0));
+    }
   }
 
   private void initializeRootImageViewIfNeeded() {
@@ -649,63 +710,65 @@ public class PlatformViewsController implements PlatformViewsAccessibilityDelega
     }
   }
 
+  /**
+   * Initializes a platform view and adds it to the view hierarchy.
+   *
+   * @param viewId The view ID. This member is not intended for public use, and is only visible for
+   *     testing.
+   */
   @VisibleForTesting
   void initializePlatformViewIfNeeded(int viewId) {
-    if (platformViews.get(viewId) != null) {
-      return;
-    }
-
-    PlatformViewsChannel.PlatformViewCreationRequest request = platformViewRequests.get(viewId);
-    if (request == null) {
+    final PlatformView platformView = platformViews.get(viewId);
+    if (platformView == null) {
       throw new IllegalStateException(
           "Platform view hasn't been initialized from the platform view channel.");
     }
-
-    if (!validateDirection(request.direction)) {
-      throw new IllegalStateException(
-          "Trying to create a view with unknown direction value: "
-              + request.direction
-              + "(view id: "
-              + viewId
-              + ")");
+    if (platformViewParent.get(viewId) != null) {
+      return;
     }
-
-    PlatformViewFactory factory = registry.getFactory(request.viewType);
-    if (factory == null) {
-      throw new IllegalStateException(
-          "Trying to create a platform view of unregistered type: " + request.viewType);
-    }
-
-    Object createParams = null;
-    if (request.params != null) {
-      createParams = factory.getCreateArgsCodec().decodeMessage(request.params);
-    }
-
-    PlatformView platformView = factory.create(context, viewId, createParams);
-    View view = platformView.getView();
-
-    if (view == null) {
+    if (platformView.getView() == null) {
       throw new IllegalStateException(
           "PlatformView#getView() returned null, but an Android view reference was expected.");
     }
-    if (view.getParent() != null) {
+    if (platformView.getView().getParent() != null) {
       throw new IllegalStateException(
           "The Android view returned from PlatformView#getView() was already added to a parent view.");
     }
-    platformViews.put(viewId, view);
-
-    FlutterMutatorView mutatorView =
+    final FlutterMutatorView parentView =
         new FlutterMutatorView(
             context, context.getResources().getDisplayMetrics().density, androidTouchProcessor);
-    mutatorViews.put(viewId, mutatorView);
-    mutatorView.addView(view);
-    ((FlutterView) flutterView).addView(mutatorView);
+
+    parentView.addOnFocusChangeListener(
+        (view, hasFocus) -> {
+          if (hasFocus) {
+            platformViewsChannel.invokeViewFocused(viewId);
+          } else {
+            textInputPlugin.clearPlatformViewClient(viewId);
+          }
+        });
+
+    platformViewParent.put(viewId, parentView);
+    parentView.addView(platformView.getView());
+    ((FlutterView) flutterView).addView(parentView);
   }
 
   public void attachToFlutterRenderer(FlutterRenderer flutterRenderer) {
     androidTouchProcessor = new AndroidTouchProcessor(flutterRenderer, /*trackMotionEvents=*/ true);
   }
 
+  /**
+   * Called when a platform view id displayed in the current frame.
+   *
+   * @param viewId The ID of the platform view.
+   * @param x The left position relative to {@code FlutterView}.
+   * @param y The top position relative to {@code FlutterView}.
+   * @param width The width of the platform view.
+   * @param height The height of the platform view.
+   * @param viewWidth The original width of the platform view before applying the mutator stack.
+   * @param viewHeight The original height of the platform view before applying the mutator stack.
+   * @param mutatorsStack The mutator stack. This member is not intended for public use, and is only
+   *     visible for testing.
+   */
   public void onDisplayPlatformView(
       int viewId,
       int x,
@@ -713,27 +776,43 @@ public class PlatformViewsController implements PlatformViewsAccessibilityDelega
       int width,
       int height,
       int viewWidth,
-      int ViewHeight,
+      int viewHeight,
       FlutterMutatorsStack mutatorsStack) {
     initializeRootImageViewIfNeeded();
     initializePlatformViewIfNeeded(viewId);
 
-    FlutterMutatorView mutatorView = mutatorViews.get(viewId);
-    mutatorView.readyToDisplay(mutatorsStack, x, y, width, height);
-    mutatorView.setVisibility(View.VISIBLE);
-    mutatorView.bringToFront();
+    final FlutterMutatorView parentView = platformViewParent.get(viewId);
+    parentView.readyToDisplay(mutatorsStack, x, y, width, height);
+    parentView.setVisibility(View.VISIBLE);
+    parentView.bringToFront();
 
-    FrameLayout.LayoutParams layoutParams = new FrameLayout.LayoutParams(viewWidth, ViewHeight);
-    View platformView = platformViews.get(viewId);
-    platformView.setLayoutParams(layoutParams);
-    platformView.bringToFront();
+    final FrameLayout.LayoutParams layoutParams =
+        new FrameLayout.LayoutParams(viewWidth, viewHeight);
+    final View view = platformViews.get(viewId).getView();
+    if (view != null) {
+      view.setLayoutParams(layoutParams);
+      view.bringToFront();
+    }
     currentFrameUsedPlatformViewIds.add(viewId);
   }
 
+  /**
+   * Called when an overlay surface is displayed in the current frame.
+   *
+   * @param id The ID of the surface.
+   * @param x The left position relative to {@code FlutterView}.
+   * @param y The top position relative to {@code FlutterView}.
+   * @param width The width of the surface.
+   * @param height The height of the surface. This member is not intended for public use, and is
+   *     only visible for testing.
+   */
   public void onDisplayOverlaySurface(int id, int x, int y, int width, int height) {
+    if (overlayLayerViews.get(id) == null) {
+      throw new IllegalStateException("The overlay surface (id:" + id + ") doesn't exist");
+    }
     initializeRootImageViewIfNeeded();
 
-    FlutterImageView overlayView = overlayLayerViews.get(id);
+    final FlutterImageView overlayView = overlayLayerViews.get(id);
     if (overlayView.getParent() == null) {
       ((FlutterView) flutterView).addView(overlayView);
     }
@@ -752,7 +831,26 @@ public class PlatformViewsController implements PlatformViewsAccessibilityDelega
     currentFrameUsedPlatformViewIds.clear();
   }
 
+  /**
+   * Called by {@code FlutterJNI} when the Flutter frame was submitted.
+   *
+   * <p>This member is not intended for public use, and is only visible for testing.
+   */
   public void onEndFrame() {
+    final FlutterView view = (FlutterView) flutterView;
+    // If there are no platform views in the current frame,
+    // then revert the image view surface and use the previous surface.
+    //
+    // Otherwise, acquire the latest image.
+    if (flutterViewConvertedToImageView && currentFrameUsedPlatformViewIds.isEmpty()) {
+      flutterViewConvertedToImageView = false;
+      view.revertImageView(
+          () -> {
+            // Destroy overlay surfaces once the surface reversion is completed.
+            finishFrame(false);
+          });
+      return;
+    }
     // Whether the current frame was rendered using ImageReaders.
     //
     // Since the image readers may not have images available at this point,
@@ -762,29 +860,19 @@ public class PlatformViewsController implements PlatformViewsAccessibilityDelega
     // If one of the surfaces doesn't have an image, the frame may be incomplete and must be
     // dropped.
     // For example, a toolbar widget painted by Flutter may not be rendered.
-    boolean isFrameRenderedUsingImageReaders = false;
+    final boolean isFrameRenderedUsingImageReaders =
+        flutterViewConvertedToImageView && view.acquireLatestImageViewFrame();
+    finishFrame(isFrameRenderedUsingImageReaders);
+  }
 
-    if (flutterViewConvertedToImageView) {
-      FlutterView view = (FlutterView) flutterView;
-      // If there are no platform views in the current frame,
-      // then revert the image view surface and use the previous surface.
-      //
-      // Otherwise, acquire the latest image.
-      if (currentFrameUsedPlatformViewIds.isEmpty()) {
-        view.revertImageView();
-        flutterViewConvertedToImageView = false;
-      } else {
-        isFrameRenderedUsingImageReaders = view.acquireLatestImageViewFrame();
-      }
-    }
-
+  private void finishFrame(boolean isFrameRenderedUsingImageReaders) {
     for (int i = 0; i < overlayLayerViews.size(); i++) {
-      int overlayId = overlayLayerViews.keyAt(i);
-      FlutterImageView overlayView = overlayLayerViews.valueAt(i);
+      final int overlayId = overlayLayerViews.keyAt(i);
+      final FlutterImageView overlayView = overlayLayerViews.valueAt(i);
 
       if (currentFrameUsedOverlayLayerIds.contains(overlayId)) {
         ((FlutterView) flutterView).attachOverlaySurfaceToRender(overlayView);
-        boolean didAcquireOverlaySurfaceImage = overlayView.acquireLatestImage();
+        final boolean didAcquireOverlaySurfaceImage = overlayView.acquireLatestImage();
         isFrameRenderedUsingImageReaders &= didAcquireOverlaySurfaceImage;
       } else {
         // If the background surface isn't rendered by the image view, then the
@@ -798,26 +886,46 @@ public class PlatformViewsController implements PlatformViewsAccessibilityDelega
       }
     }
 
-    for (int i = 0; i < platformViews.size(); i++) {
-      int viewId = platformViews.keyAt(i);
-      View platformView = platformViews.get(viewId);
-      View mutatorView = mutatorViews.get(viewId);
+    for (int i = 0; i < platformViewParent.size(); i++) {
+      final int viewId = platformViewParent.keyAt(i);
+      final View parentView = platformViewParent.get(viewId);
 
       // Show platform views only if the surfaces have images available in this frame,
       // and if the platform view is rendered in this frame.
+      // The platform view is appended to a mutator view.
       //
       // Otherwise, hide the platform view, but don't remove it from the view hierarchy yet as
       // they are removed when the framework diposes the platform view widget.
       if (isFrameRenderedUsingImageReaders && currentFrameUsedPlatformViewIds.contains(viewId)) {
-        platformView.setVisibility(View.VISIBLE);
-        mutatorView.setVisibility(View.VISIBLE);
+        parentView.setVisibility(View.VISIBLE);
       } else {
-        platformView.setVisibility(View.GONE);
-        mutatorView.setVisibility(View.GONE);
+        parentView.setVisibility(View.GONE);
       }
     }
   }
 
+  /**
+   * Creates and tracks the overlay surface.
+   *
+   * @param imageView The surface that displays the overlay.
+   * @return Wrapper object that provides the layer id and the surface. This member is not intended
+   *     for public use, and is only visible for testing.
+   */
+  @VisibleForTesting
+  @TargetApi(19)
+  public FlutterOverlaySurface createOverlaySurface(@NonNull FlutterImageView imageView) {
+    final int id = nextOverlayLayerId++;
+    overlayLayerViews.put(id, imageView);
+    return new FlutterOverlaySurface(id, imageView.getSurface());
+  }
+
+  /**
+   * Creates an overlay surface while the Flutter view is rendered by {@code FlutterImageView}.
+   *
+   * <p>This method is invoked by {@code FlutterJNI} only.
+   *
+   * <p>This member is not intended for public use, and is only visible for testing.
+   */
   @TargetApi(19)
   public FlutterOverlaySurface createOverlaySurface() {
     // Overlay surfaces have the same size as the background surface.
@@ -826,25 +934,29 @@ public class PlatformViewsController implements PlatformViewsAccessibilityDelega
     // if the drawings they contain have a different tight bound.
     //
     // The final view size is determined when its frame is set.
-    FlutterImageView imageView =
+    return createOverlaySurface(
         new FlutterImageView(
             flutterView.getContext(),
             flutterView.getWidth(),
             flutterView.getHeight(),
-            FlutterImageView.SurfaceKind.overlay);
-
-    int id = nextOverlayLayerId++;
-    overlayLayerViews.put(id, imageView);
-
-    return new FlutterOverlaySurface(id, imageView.getSurface());
+            FlutterImageView.SurfaceKind.overlay));
   }
 
+  /**
+   * Destroys the overlay surfaces and removes them from the view hierarchy.
+   *
+   * <p>This method is used only internally by {@code FlutterJNI}.
+   *
+   * <p>This member is not intended for public use, and is only visible for testing.
+   */
   public void destroyOverlaySurfaces() {
     for (int i = 0; i < overlayLayerViews.size(); i++) {
       int overlayId = overlayLayerViews.keyAt(i);
       FlutterImageView overlayView = overlayLayerViews.valueAt(i);
       overlayView.detachFromRenderer();
-      ((FlutterView) flutterView).removeView(overlayView);
+      if (flutterView != null) {
+        ((FlutterView) flutterView).removeView(overlayView);
+      }
     }
     overlayLayerViews.clear();
   }

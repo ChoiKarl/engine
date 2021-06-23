@@ -4,14 +4,12 @@
 
 #include "flutter/lib/ui/painting/image_descriptor.h"
 
+#include "flutter/fml/build_config.h"
 #include "flutter/fml/logging.h"
 #include "flutter/fml/trace_event.h"
-#include "flutter/lib/ui/painting/codec.h"
-#include "flutter/lib/ui/painting/image_decoder.h"
 #include "flutter/lib/ui/painting/multi_frame_codec.h"
 #include "flutter/lib/ui/painting/single_frame_codec.h"
 #include "flutter/lib/ui/ui_dart_state.h"
-#include "third_party/skia/src/codec/SkCodecImageGenerator.h"
 #include "third_party/tonic/dart_binding_macros.h"
 #include "third_party/tonic/logging/dart_invoke.h"
 
@@ -24,7 +22,8 @@ IMPLEMENT_WRAPPERTYPEINFO(ui, ImageDescriptor);
   V(ImageDescriptor, instantiateCodec) \
   V(ImageDescriptor, width)            \
   V(ImageDescriptor, height)           \
-  V(ImageDescriptor, bytesPerPixel)
+  V(ImageDescriptor, bytesPerPixel)    \
+  V(ImageDescriptor, dispose)
 
 FOR_EACH_BINDING(DART_NATIVE_CALLBACK)
 
@@ -35,10 +34,8 @@ void ImageDescriptor::RegisterNatives(tonic::DartLibraryNatives* natives) {
 }
 
 const SkImageInfo ImageDescriptor::CreateImageInfo() const {
-  if (!generator_) {
-    return SkImageInfo::MakeUnknown();
-  }
-  return generator_->getInfo();
+  FML_DCHECK(generator_);
+  return generator_->GetInfo();
 }
 
 ImageDescriptor::ImageDescriptor(sk_sp<SkData> buffer,
@@ -50,12 +47,9 @@ ImageDescriptor::ImageDescriptor(sk_sp<SkData> buffer,
       row_bytes_(row_bytes) {}
 
 ImageDescriptor::ImageDescriptor(sk_sp<SkData> buffer,
-                                 std::unique_ptr<SkCodec> codec)
+                                 std::unique_ptr<ImageGenerator> generator)
     : buffer_(std::move(buffer)),
-      generator_(std::shared_ptr<SkCodecImageGenerator>(
-          static_cast<SkCodecImageGenerator*>(
-              SkCodecImageGenerator::MakeFromCodec(std::move(codec))
-                  .release()))),
+      generator_(std::move(generator)),
       image_info_(CreateImageInfo()),
       row_bytes_(std::nullopt) {}
 
@@ -77,15 +71,31 @@ void ImageDescriptor::initEncoded(Dart_NativeArguments args) {
     return;
   }
 
-  std::unique_ptr<SkCodec> codec =
-      SkCodec::MakeFromData(immutable_buffer->data());
-  if (!codec) {
+  // This has to be valid because this method is called from Dart.
+  auto dart_state = UIDartState::Current();
+  auto registry = dart_state->GetImageGeneratorRegistry();
+
+  if (!registry) {
+    Dart_SetReturnValue(
+        args, tonic::ToDart("Failed to access the internal image decoder "
+                            "registry on this isolate. Please file a bug on "
+                            "https://github.com/flutter/flutter/issues."));
+    return;
+  }
+
+  std::unique_ptr<ImageGenerator> generator =
+      registry->CreateCompatibleGenerator(immutable_buffer->data());
+
+  if (!generator) {
+    // No compatible image decoder was found.
     Dart_SetReturnValue(args, tonic::ToDart("Invalid image data"));
     return;
   }
 
   auto descriptor = fml::MakeRefCounted<ImageDescriptor>(
-      immutable_buffer->data(), std::move(codec));
+      immutable_buffer->data(), std::move(generator));
+
+  FML_DCHECK(descriptor);
 
   descriptor->AssociateWithDartWrapper(descriptor_handle);
   tonic::DartInvoke(callback_handle, {Dart_TypeVoid()});
@@ -119,7 +129,7 @@ void ImageDescriptor::instantiateCodec(Dart_Handle codec_handle,
                                        int target_width,
                                        int target_height) {
   fml::RefPtr<Codec> ui_codec;
-  if (!generator_ || generator_->getFrameCount() == 1) {
+  if (!generator_ || generator_->GetFrameCount() == 1) {
     ui_codec = fml::MakeRefCounted<SingleFrameCodec>(
         static_cast<fml::RefPtr<ImageDescriptor>>(this), target_width,
         target_height);
@@ -128,4 +138,28 @@ void ImageDescriptor::instantiateCodec(Dart_Handle codec_handle,
   }
   ui_codec->AssociateWithDartWrapper(codec_handle);
 }
+
+sk_sp<SkImage> ImageDescriptor::image() const {
+  SkBitmap bitmap;
+  if (!bitmap.tryAllocPixels(image_info_)) {
+    FML_DLOG(ERROR) << "Failed to allocate memory for bitmap of size "
+                    << image_info_.computeMinByteSize() << "B";
+    return nullptr;
+  }
+
+  const auto& pixmap = bitmap.pixmap();
+  if (!get_pixels(pixmap)) {
+    FML_DLOG(ERROR) << "Failed to get pixels for image.";
+    return nullptr;
+  }
+  bitmap.setImmutable();
+  return SkImage::MakeFromBitmap(bitmap);
+}
+
+bool ImageDescriptor::get_pixels(const SkPixmap& pixmap) const {
+  FML_DCHECK(generator_);
+  return generator_->GetPixels(pixmap.info(), pixmap.writable_addr(),
+                               pixmap.rowBytes());
+}
+
 }  // namespace flutter
